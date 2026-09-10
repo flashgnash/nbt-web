@@ -594,6 +594,26 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 }
 .p-name { color: var(--text); font-weight: bold; text-align: center; overflow-wrap: anywhere; }
 
+/* servers landing — cards reuse .p-card; columns balanced by balancedGrid() */
+.sv-servers { display: grid; gap: 14px; }
+/* server-icon.png is 64x64 — a square tile, unlike the 120x160 skin box */
+.s-icon, .s-icon .skin-fallback, .s-icon img { width: 120px; height: 120px; }
+.s-icon img { object-fit: contain; image-rendering: pixelated; }
+.s-meta { display: flex; justify-content: center; }
+.s-status {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.s-status.online { color: var(--accent); border: 1px solid var(--accent); }
+.s-status.offline { color: var(--dim); border: 1px solid var(--dim); }
+.s-players { color: var(--dim); font-size: 13px; }
+.s-footer { color: var(--dim); font-size: 11px; text-align: center; }
+
 .sv-files { flex: 1 1 100%; display: flex; flex-direction: column; gap: 8px; }
 .sv-file-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .sv-file {
