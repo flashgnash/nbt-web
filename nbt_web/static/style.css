@@ -662,4 +662,5 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 @media (max-width: 720px) {
   body { flex-direction: column; }
   #sidebar { width: 100%; max-height: 40%; border-right: none; border-bottom: 1px solid var(--border); }
+  #topbar { flex-wrap: wrap; }
 }

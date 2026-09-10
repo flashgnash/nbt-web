@@ -3108,7 +3108,7 @@ function renderServersLanding() {
       meta.appendChild(serverStatusPill(st));
       const n = st ? st.players : 0;
       const mx = st && st.maxPlayers != null ? st.maxPlayers : null;
-      count.textContent = mx != null ? `${n} players · ${mx} max` : `${n} player${n === 1 ? "" : "s"}`;
+      count.textContent = mx != null ? `${n} player${n === 1 ? "" : "s"} · ${mx} max` : `${n} player${n === 1 ? "" : "s"}`;
       if (st && !st.online && st.lastActive) {
         footer.textContent = "last booted " + relTimeAgo(st.lastActive);
         footer.hidden = false;
