@@ -1374,7 +1374,9 @@ function stackInfo(n) {
   if (!idKey) return null;
   const qtyKey = STACK_QTY_KEYS.find((k) => n.v[k] && !CONTAINERS.has(n.v[k].t));
   if (!qtyKey && !("components" in n.v) && !("tag" in n.v)) return null;
-  return { kind: idKey === "id" ? "item" : "fluid", idKey, qtyKey, node: n };
+  const CHEMICAL_KEYS = new Set(["gasName", "slurryName", "pigmentName", "infuseTypeName"]);
+  const kind = idKey === "id" ? "item" : CHEMICAL_KEYS.has(idKey) ? "chemical" : "fluid";
+  return { kind, idKey, qtyKey, node: n };
 }
 
 const pathLeaf = (p) => (p.split(/[.[]/).filter(Boolean).pop() || p).replace(/]/g, "");
@@ -2094,13 +2096,18 @@ function slotCell(pane, slot, entry, caption, state, rerender) {
   return cell;
 }
 
+const SANE_MAX = 255;
+
 function paneRows(pane, bySlot) {
   const keys = [...bySlot.keys()];
   // Use the real declared capacity (Size-1) when known; never invent empty slots.
   // Guard against empty pane (Math.max(...[]) = -Infinity) by always including 0.
+  // Clamp to SANE_MAX so a malformed Size int can't spawn thousands of cells, but
+  // never below max occupied key so every real slot always renders.
+  const maxOccupied = Math.max(...keys, 0);
   const cap = pane.size != null
-    ? Math.max(pane.size - 1, ...keys, 0)
-    : Math.max(...keys, 0);
+    ? Math.max(Math.min(pane.size - 1, SANE_MAX), maxOccupied)
+    : maxOccupied;
   const rows = [];
   for (let a = 0; a <= cap; a += 9)
     rows.push(range(a, Math.min(a + 8, cap)));
@@ -2825,7 +2832,7 @@ function renderStackRow(s, rerender) {
   const combo = comboBox({
     options: s.kind === "item" ? itemIds : [],
     initial: String(idNode.v),
-    iconKind: s.kind === "item" ? "item" : "fluid",
+    iconKind: s.kind === "item" ? "item" : s.kind === "fluid" ? "fluid" : null,
     onChange: (v) => {
       idNode.v = (v.includes(":") || !v) ? v : "minecraft:" + v;
       setDirty(true);
