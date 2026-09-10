@@ -11,6 +11,7 @@ Only *.dat / *.dat_old / *.nbt files inside the root are ever touched.
 """
 
 import argparse
+import gzip
 import json
 import os
 import re
@@ -607,13 +608,28 @@ MIME = {".html": "text/html", ".js": "text/javascript", ".css": "text/css",
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def _send(self, status, body: bytes, ctype="application/json", cache="no-store"):
+    def _send(self, status, body: bytes, ctype="application/json", cache="no-store",
+              extra=None):
+        # gzip when the client accepts it and there's enough body to be worth
+        # it — the tree JSON and the JS/CSS are big and highly compressible, and
+        # this link is slow.
+        enc = None
+        if (len(body) > 512 and not ctype.startswith("image/")
+                and "gzip" in self.headers.get("Accept-Encoding", "")):
+            body = gzip.compress(body, 6)
+            enc = "gzip"
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
+        if enc:
+            self.send_header("Content-Encoding", enc)
+            self.send_header("Vary", "Accept-Encoding")
+        for k, v in (extra or []):
+            self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _json(self, status, obj):
         self._send(status, json.dumps(obj).encode())
@@ -688,7 +704,19 @@ class Handler(BaseHTTPRequestHandler):
         p = (STATIC / name).resolve()
         if STATIC.resolve() not in p.parents or not p.is_file():
             return self._json(404, {"error": "not found"})
-        self._send(200, p.read_bytes(), MIME.get(p.suffix, "application/octet-stream"))
+        # Let the browser revalidate cheaply: an ETag from (mtime, size) means a
+        # repeat load gets a tiny 304 instead of re-downloading ~90 KB of JS/CSS.
+        st = p.stat()
+        etag = f'"{int(st.st_mtime)}-{st.st_size}"'
+        cache = "no-cache"   # cache, but revalidate every time (instant on 304)
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache)
+            self.end_headers()
+            return
+        self._send(200, p.read_bytes(), MIME.get(p.suffix, "application/octet-stream"),
+                   cache=cache, extra=[("ETag", etag)])
 
 
 def main():
