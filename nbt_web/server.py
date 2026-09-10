@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import sys
 import tempfile
 import threading
@@ -725,15 +726,25 @@ def main():
     ap.add_argument("--root", required=True, help="parent directory containing server dirs")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8585)
+    ap.add_argument("--tls-cert", help="PEM certificate file; serves HTTPS when given together with --tls-key")
+    ap.add_argument("--tls-key", help="PEM private-key file (pairs with --tls-cert)")
     args = ap.parse_args()
     ROOT = Path(args.root)
     if not ROOT.is_dir():
         sys.exit(f"root directory does not exist: {ROOT}")
+    if bool(args.tls_cert) != bool(args.tls_key):
+        sys.exit("--tls-cert and --tls-key must be given together")
     with _tree_lock:
         _tree_cache["building"] = True
     threading.Thread(target=_prewarm, daemon=True).start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"nbt-web serving {ROOT} on http://{args.host}:{args.port}", flush=True)
+    scheme = "http"
+    if args.tls_cert:
+        ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ctx.load_cert_chain(args.tls_cert, args.tls_key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        scheme = "https"
+    print(f"nbt-web serving {ROOT} on {scheme}://{args.host}:{args.port}", flush=True)
     srv.serve_forever()
 
 

@@ -22,7 +22,28 @@ in
     port = lib.mkOption {
       type = lib.types.port;
       default = 8585;
-      description = "HTTP port.";
+      description = "Port to listen on (HTTPS when tlsCertFile/tlsKeyFile are set, otherwise HTTP).";
+    };
+
+    tlsCertFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/etc/ssl/tailscale-certs/cert.pem";
+      description = "PEM certificate file. Set together with tlsKeyFile to serve HTTPS. Point these at a cert-provisioning service (e.g. a tailscale cert), and add its group to supplementaryGroups so the service can read the key.";
+    };
+
+    tlsKeyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/etc/ssl/tailscale-certs/key.pem";
+      description = "PEM private-key file (pairs with tlsCertFile).";
+    };
+
+    supplementaryGroups = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "certs" ];
+      description = "Extra groups for the service — e.g. the group that owns the TLS cert/key.";
     };
 
     user = lib.mkOption {
@@ -45,14 +66,25 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = (cfg.tlsCertFile == null) == (cfg.tlsKeyFile == null);
+        message = "services.nbt-web: tlsCertFile and tlsKeyFile must be set together.";
+      }
+    ];
+
     systemd.services.nbt-web = {
       description = "web-based NBT editor";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
       serviceConfig = {
-        ExecStart = "${pkg}/bin/nbt-web --root ${cfg.parentDir} --host 0.0.0.0 --port ${toString cfg.port}";
+        ExecStart =
+          "${pkg}/bin/nbt-web --root ${cfg.parentDir} --host 0.0.0.0 --port ${toString cfg.port}"
+          + lib.optionalString (cfg.tlsCertFile != null)
+            " --tls-cert ${cfg.tlsCertFile} --tls-key ${cfg.tlsKeyFile}";
         User = cfg.user;
         Group = cfg.group;
+        SupplementaryGroups = cfg.supplementaryGroups;
         Restart = "on-failure";
         RestartSec = 5;
 
