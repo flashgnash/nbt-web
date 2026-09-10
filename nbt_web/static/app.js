@@ -1023,11 +1023,28 @@ function attachIcon(box, id, kind) {
   const server = encodeURIComponent(fileServer());
   const iconUrl = `/api/icon?server=${server}&id=${encodeURIComponent(id)}` +
                   (kind === "effect" ? "&kind=effect" : "");
+  const texUrl = (rl) => `/api/texture?server=${server}&id=${encodeURIComponent(rl)}`;
   const cdn = [];
   if (ns === "minecraft") {
     if (kind === "effect") cdn.push(`${VANILLA_CDN}/mob_effect/${name}.png`);
     else cdn.push(`${VANILLA_CDN}/item/${name}.png`, `${VANILLA_CDN}/block/${name}.png`);
   }
+
+  // Fluid still textures are vertical animation strips — crop to top frame via CSS.
+  if (kind === "fluid") {
+    img.classList.add("fluid-still");
+    const stillId = `${ns}:${name}_still`;
+    const urls = [
+      `/api/icon?server=${server}&id=${encodeURIComponent(stillId)}`,
+      texUrl(`${ns}:block/${name}_still`),
+      texUrl(`${ns}:block/fluids/${name}_still`),
+    ];
+    if (ns === "minecraft") urls.push(`${VANILLA_CDN}/block/${name}_still.png`);
+    urls.push(`${VANILLA_CDN}/block/water_still.png`);
+    play(urls);
+    return;
+  }
+
   // Vanilla and effects have no minecraft: model in the jars (effects use a
   // dedicated index), so keep the existing icon -> CDN chain.
   if (ns === "minecraft" || kind === "effect") { play([iconUrl, ...cdn]); return; }
@@ -1035,7 +1052,6 @@ function attachIcon(box, id, kind) {
   // Modded item: resolve its model so we serve the RIGHT texture (a basename
   // guess can collide with an unrelated item) and never blank out — a
   // representative texture (particle / first texture) beats an empty slot.
-  const texUrl = (rl) => `/api/texture?server=${server}&id=${encodeURIComponent(rl)}`;
   resolveModel(id).then((doc) => {
     const urls = [];
     if (doc && doc.textures) {
@@ -1316,21 +1332,24 @@ function cleanLabel(parts) {
 // re-surfaced as separate top-level inventories.
 function findItemLists(node) {
   const out = [];
-  (function walk(n, path, parts, depth) {
+  (function walk(n, path, parts, depth, parent) {
     if (!n || depth > 20 || out.length >= 100) return;
     if (n.t === "list") {
-      if (isDirectItemList(n)) { out.push({ path, label: cleanLabel(parts), node: n, style: "direct" }); return; }
-      if (isWrappedItemList(n)) { out.push({ path, label: cleanLabel(parts), node: n, style: "wrapped" }); return; }
+      // sibling Size int in the parent compound gives the real slot capacity
+      const sizeNode = parent && parent.v && (parent.v.Size || parent.v.size);
+      const size = sizeNode && !CONTAINERS.has(sizeNode.t) ? Number(sizeNode.v) : null;
+      if (isDirectItemList(n)) { out.push({ path, label: cleanLabel(parts), node: n, style: "direct", size }); return; }
+      if (isWrappedItemList(n)) { out.push({ path, label: cleanLabel(parts), node: n, style: "wrapped", size }); return; }
       n.v.forEach((c, i) => {                       // descend into handler/holder lists
         if (c && c.t === "compound")
-          walk(c, `${path}[${i}]`, parts.concat(nameOf(c) || `#${i}`), depth + 1);
+          walk(c, `${path}[${i}]`, parts.concat(nameOf(c) || `#${i}`), depth + 1, null);
       });
       return;
     }
     if (n.t === "compound")
       for (const k of Object.keys(n.v))
-        walk(n.v[k], path ? path + "." + k : k, parts.concat(k), depth + 1);
-  })(node, "", [], 0);
+        walk(n.v[k], path ? path + "." + k : k, parts.concat(k), depth + 1, n);
+  })(node, "", [], 0, null);
   return out;
 }
 
@@ -1403,20 +1422,35 @@ function storageGroups(root) {
 }
 
 // every inventory-shaped list in the file: Inventory + EnderItems first,
-// then anything else holding actual items (curios/baubles/accessories/
+// then curios merged into one root, then anything else (baubles/accessories/
 // aether/mod attachments), labelled by its path
 function discoverInventories() {
   const out = [];
   const seen = new Set();
-  const push = (key, label, node, style) => {
-    if (!seen.has(key)) { seen.add(key); out.push({ key, label, node, style }); }
+  const push = (key, label, node, style, size) => {
+    if (!seen.has(key)) { seen.add(key); out.push({ key, label, node, style, size: size ?? null }); }
   };
   const inv = file.root.v.Inventory, end = file.root.v.EnderItems;
-  if (inv && inv.t === "list") push("Inventory", "inventory", inv, "direct");
-  if (end && end.t === "list") push("EnderItems", "ender chest", end, "direct");
-  for (const f of findItemLists(file.root))
-    if (f.path !== "Inventory" && f.path !== "EnderItems")
-      push(f.path, f.label, f.node, f.style);
+  if (inv && inv.t === "list") push("Inventory", "inventory", inv, "direct", null);
+  if (end && end.t === "list") push("EnderItems", "ender chest", end, "direct", null);
+
+  const curiosPanes = [];
+  for (const f of findItemLists(file.root)) {
+    if (f.path === "Inventory" || f.path === "EnderItems") continue;
+    // Curios[i].StacksHandler.Stacks.Items — group all slot-types under one root
+    if (/Curios\[\d+\]/.test(f.path)) {
+      curiosPanes.push({ caption: f.label, node: f.node, style: f.style, size: f.size });
+    } else {
+      push(f.path, f.label, f.node, f.style, f.size);
+    }
+  }
+  if (curiosPanes.length && !seen.has("curios")) {
+    seen.add("curios");
+    // insert after Inventory/EnderItems but before other modded lists
+    const insertAt = out.findIndex((e) => e.key !== "Inventory" && e.key !== "EnderItems");
+    const entry = { key: "curios", label: "curios", node: null, style: null, subPanes: curiosPanes };
+    if (insertAt === -1) out.push(entry); else out.splice(insertAt, 0, entry);
+  }
   return out;
 }
 
@@ -2061,12 +2095,43 @@ function slotCell(pane, slot, entry, caption, state, rerender) {
 }
 
 function paneRows(pane, bySlot) {
-  const maxSlot = Math.max(26, ...bySlot.keys());
+  const keys = [...bySlot.keys()];
+  // Use the real declared capacity (Size-1) when known; never invent empty slots.
+  // Guard against empty pane (Math.max(...[]) = -Infinity) by always including 0.
+  const cap = pane.size != null
+    ? Math.max(pane.size - 1, ...keys, 0)
+    : Math.max(...keys, 0);
   const rows = [];
-  const cap = maxSlot <= 53 ? maxSlot : 26;
   for (let a = 0; a <= cap; a += 9)
     rows.push(range(a, Math.min(a + 8, cap)));
   return rows;
+}
+
+// Fallback equipment sources for when armor/offhand aren't in Inventory slots.
+// Returns a slot→itemNode map from 'equipment' compound or ArmorItems/Offhand lists.
+function equipmentFallback() {
+  const fb = new Map();
+  const equip = file.root.v.equipment;
+  if (equip && equip.t === "compound") {
+    const keyMap = { head: 103, chest: 102, legs: 101, feet: 100, offhand: -106 };
+    for (const [key, slot] of Object.entries(keyMap)) {
+      const node = equip.v[key];
+      if (node && node.t === "compound" && node.v.id) fb.set(slot, node);
+    }
+    return fb;
+  }
+  const ai = file.root.v.ArmorItems;
+  if (ai && ai.t === "list") {
+    const slots = [100, 101, 102, 103]; // boots, leggings, chestplate, helmet
+    ai.v.forEach((item, i) => {
+      if (i < slots.length && item && item.t === "compound" && item.v.id)
+        fb.set(slots[i], item);
+    });
+  }
+  const ofh = file.root.v.Offhand;
+  if (ofh && ofh.t === "list" && ofh.v[0] && ofh.v[0].t === "compound" && ofh.v[0].v.id)
+    fb.set(-106, ofh.v[0]);
+  return fb;
 }
 
 function renderPane(pane, state, rerender) {
@@ -2094,8 +2159,9 @@ function renderPane(pane, state, rerender) {
     left.appendChild(hot);
     const armor = document.createElement("div");
     armor.className = "armor-col";
+    const fb = equipmentFallback();
     for (const [slot, cap] of ARMOR_SLOTS)
-      armor.appendChild(slotCell(pane, slot, bySlot.get(slot), cap, state, rerender));
+      armor.appendChild(slotCell(pane, slot, bySlot.get(slot) || fb.get(slot), cap, state, rerender));
     wrap.appendChild(armor);
     drawn = new Set([...range(0, 35).map((c) => c[0]), ...ARMOR_SLOTS.map((a) => a[0])]);
   } else {
@@ -2135,8 +2201,11 @@ function renderInventoryBrowser(roots, state, rerender) {
   else {
     const root = roots.find((r) => r.key === state.rootKey) || roots[0];
     state.rootKey = root.key;
-    panes = [{ caption: null, node: root.node, style: root.style,
-               rootKey: root.key === "Inventory" ? "Inventory" : null }];
+    // curios and other merged roots carry pre-built subPanes (one per slot-type)
+    panes = root.subPanes
+      ? root.subPanes
+      : [{ caption: null, node: root.node, style: root.style, size: root.size,
+           rootKey: root.key === "Inventory" ? "Inventory" : null }];
   }
 
   // crumb bar
@@ -2756,7 +2825,7 @@ function renderStackRow(s, rerender) {
   const combo = comboBox({
     options: s.kind === "item" ? itemIds : [],
     initial: String(idNode.v),
-    iconKind: s.kind === "item" ? "item" : null,
+    iconKind: s.kind === "item" ? "item" : "fluid",
     onChange: (v) => {
       idNode.v = (v.includes(":") || !v) ? v : "minecraft:" + v;
       setDirty(true);
@@ -2802,6 +2871,19 @@ function renderStorageView() {
     }
   };
   render();
+  return wrap;
+}
+
+// Inventory grid view for non-player files (EnderStorage, backpacks, etc.)
+// Uses discoverInventories() to find all item lists and renders as dropdown+grid.
+function renderInventoryView() {
+  const wrap = document.createElement("div");
+  wrap.className = "pv-main";
+  const rerender = () => {
+    wrap.textContent = "";
+    wrap.appendChild(renderInventoryBrowser(discoverInventories(), invState, rerender));
+  };
+  rerender();
   return wrap;
 }
 
@@ -3227,14 +3309,17 @@ function renderEditor() {
   if (ctx && ctx.player.files.length > 1) el.appendChild(playerFileTabs(ctx));
   const player = isPlayerFile(file);
   const hasStorage = !player && findStacks(file.root).length > 0;
+  const hasInventory = !player && discoverInventories().length > 0;
   const modes = [];
   if (player) modes.push(["player", "player"]);
+  if (hasInventory) modes.push(["inventory", "inventory"]);
   if (hasStorage) modes.push(["storage", "storage"]);
   modes.push(["raw", "raw nbt"]);
   if (!modes.some((m) => m[0] === viewMode)) viewMode = modes[0][0];
   $("filter").hidden = viewMode !== "raw";
   if (modes.length > 1) el.appendChild(viewTabs(modes));
   if (viewMode === "player") { el.appendChild(renderPlayerView()); return; }
+  if (viewMode === "inventory") { el.appendChild(renderInventoryView()); return; }
   if (viewMode === "storage") { el.appendChild(renderStorageView()); return; }
   const q = $("filter").value.trim().toLowerCase();
   el.appendChild(renderNode(file.root, file.rootName || "(root)", "$", null, q));
