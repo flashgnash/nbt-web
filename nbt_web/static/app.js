@@ -1994,19 +1994,30 @@ function renderServerView(s) {
   wrap.appendChild(players);
   if (s.players && s.players.length) balancedGrid(players, 152);
 
-  // Flatten every world's files into one wrapped list. The "world /" (or
-  // whatever the single dir is called) prefix only earns its keep when there
-  // is more than one directory to tell apart — with a single world, drop it.
-  const entries = [];
+  // Group world files by their full relative directory path — flat, one card
+  // per directory, no nesting. The label base is the world's data dir, so a
+  // file at <world>/data/ImmersiveEngineering/MyData/foo.dat lands in a single
+  // group "ImmersiveEngineering/MyData". Files at a world root (level.dat) or
+  // sitting directly in data/ keep the old behavior: grouped under the world.
+  const groups = new Map();          // dir label -> [{ label, path, title }]
+  const allPaths = [];
+  const add = (key, e) => {
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+    allPaths.push(e.path);
+  };
   for (const w of s.worlds) {
-    entries.push({ dir: w.name, label: "level.dat", path: w.level,
-                   title: `${s.name} / ${w.name}` });
-    for (const d of w.data)
-      entries.push({ dir: w.name, label: d.label, path: d.path,
-                     title: `${s.name} / ${w.name} / ${d.label}` });
+    const dataDir = w.level.replace(/\/level\.dat$/, "") + "/data/";
+    add(w.name, { label: "level.dat", path: w.level,
+                  title: `${s.name} / ${w.name}` });
+    for (const d of w.data) {
+      const fileDir = d.path.slice(0, d.path.lastIndexOf("/") + 1);
+      const key = fileDir.startsWith(dataDir) && fileDir.length > dataDir.length
+        ? fileDir.slice(dataDir.length, -1) : w.name;
+      add(key, { label: d.label, path: d.path,
+                 title: `${s.name} / ${w.name} / ${d.label}` });
+    }
   }
-  const dirs = new Set(entries.map((e) => e.dir));
-  const showDir = dirs.size > 1;
 
   const files = document.createElement("div");
   files.className = "sv-files";
@@ -2014,22 +2025,36 @@ function renderServerView(s) {
   title.className = "card-title";
   title.textContent = "files";
   files.appendChild(title);
-  const list = document.createElement("div");
-  list.className = "sv-file-list";
-  for (const e of entries) {
-    const b = document.createElement("button");
-    b.className = "sv-file";
-    b.textContent = showDir ? `${e.dir} / ${e.label}` : e.label;
-    b.addEventListener("click", () => openFile(e.path, e.title));
-    list.appendChild(b);
+  // Reuse the effect-cards flex-fill grid: .effect-cards wraps a row of
+  // .effect-card (flex: 1 1 250px) so cards grow to keep rows balanced.
+  const cards = document.createElement("div");
+  cards.className = "effect-cards";
+  for (const [key, group] of groups) {
+    const card = document.createElement("div");
+    card.className = "effect-card";
+    const ct = document.createElement("div");
+    ct.className = "card-title";
+    ct.textContent = key;
+    card.appendChild(ct);
+    const list = document.createElement("div");
+    list.className = "sv-file-list";
+    for (const e of group) {
+      const b = document.createElement("button");
+      b.className = "sv-file";
+      b.textContent = e.label;
+      b.addEventListener("click", () => openFile(e.path, e.title));
+      list.appendChild(b);
+    }
+    card.appendChild(list);
+    cards.appendChild(card);
   }
-  files.appendChild(list);
+  files.appendChild(cards);
   wrap.appendChild(files);
 
   // Warm the cache for everything reachable from this screen so the first
   // click opens instantly instead of parsing on demand.
   prefetchFiles([...(s.players || []).map((p) => p.files[0].path),
-                 ...entries.map((e) => e.path)]);
+                 ...allPaths]);
   return wrap;
 }
 
