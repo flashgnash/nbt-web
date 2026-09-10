@@ -2882,8 +2882,7 @@ function openServerView(s) {
   $("backup").disabled = true;
   $("restore").disabled = true;
   $("reload").disabled = true;
-  $("filelabel").textContent = s.name;
-  $("filelabel").classList.remove("dim");
+  setFilelabel(s.name);
   history.replaceState(null, "", "#server=" + encodeURIComponent(s.name));
   if (activeRow) { activeRow.classList.remove("active"); activeRow = null; }
   setStatus(null);
@@ -3286,8 +3285,7 @@ async function openFile(path, label, row) {
     $("tagsearch").hidden = false;
     setDirty(false);
     setStatus(null);
-    $("filelabel").textContent = label || path;
-    $("filelabel").classList.remove("dim");
+    setFilelabel(label || path);
     history.replaceState(null, "", "#path=" + encodeURIComponent(path));
     $("filter").hidden = false;
     $("reload").disabled = false;
@@ -3384,6 +3382,47 @@ async function toggleRestoreMenu() {
   }
 }
 
+// --------------------------------------------------------------- breadcrumb
+
+function navBreadcrumb(segs, idx) {
+  if (!tree) return;
+  const s = tree.servers.find((sv) => sv.name === segs[0]);
+  if (!s) return;
+  if (idx === 0) { openServerView(s); return; }
+  const seg = segs[idx];
+  const p = (s.players || []).find((pl) => pl.label === seg);
+  if (p && p.files.length) {
+    const pd = p.files[0];
+    openFile(pd.path, `${s.name} / ${p.label} / ${pd.label}`);
+    return;
+  }
+  const w = s.worlds.find((wr) => wr.name === seg);
+  if (w) openFile(w.level, `${s.name} / ${w.name}`);
+}
+
+function setFilelabel(label) {
+  const el = $("filelabel");
+  el.textContent = "";
+  el.classList.remove("dim");
+  if (!label || !tree) { el.textContent = label || "no file open"; return; }
+  const segs = label.split(" / ");
+  segs.forEach((seg, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = " / ";
+      el.appendChild(sep);
+    }
+    const isLast = (i === segs.length - 1);
+    const btn = document.createElement("button");
+    btn.className = "crumb" + (isLast ? " here" : "");
+    btn.textContent = seg;
+    btn.disabled = isLast;
+    if (!isLast) btn.addEventListener("click", () => navBreadcrumb(segs, i));
+    el.appendChild(btn);
+  });
+}
+
 // ---------------------------------------------------------------- init
 
 function collapseSidebar() {
@@ -3391,7 +3430,8 @@ function collapseSidebar() {
 }
 
 $("sidebar-toggle").addEventListener("click", () => {
-  $("sidebar").classList.toggle("open");
+  if (window.innerWidth > 720) $("sidebar").classList.toggle("collapsed");
+  else $("sidebar").classList.toggle("open");
 });
 $("sidebar-backdrop").addEventListener("click", collapseSidebar);
 

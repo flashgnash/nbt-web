@@ -95,7 +95,8 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   background: var(--panel);
 }
 #topbar .spacer { flex: 1; }
-#sidebar-toggle { display: none; }
+#sidebar-toggle { display: flex; align-items: center; }
+#sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
 #filelabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #filter { width: 180px; flex: 0 1 auto; }
 #tagsearch { width: 260px; flex: 0 1 auto; }
@@ -426,8 +427,9 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   border-radius: 4px;
   cursor: pointer;
 }
-.crumb:hover { background: var(--hover); }
-.crumb.here { color: var(--accent); font-weight: bold; }
+.crumb:hover:not(:disabled) { background: var(--hover); }
+.crumb.here { color: var(--accent); font-weight: bold; cursor: default; }
+.crumb:disabled { cursor: default; }
 .crumb-spacer { flex: 1; }
 .crumb-bar .pv-input { max-width: 220px; }
 .pane-cap { color: var(--dim); font-size: 11px; }
@@ -684,7 +686,6 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
     transition: transform 200ms ease;
   }
   #sidebar.open { transform: translateX(0); }
-  #sidebar-toggle { display: flex; align-items: center; }
   #topbar { flex-wrap: wrap; }
   #sidebar-backdrop {
     position: fixed;
