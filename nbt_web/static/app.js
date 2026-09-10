@@ -2235,9 +2235,15 @@ window.addEventListener("beforeunload", (ev) => {
 
 (async () => {
   try {
-    setStatus("loading server tree…");
-    tree = await api("/api/tree");
-    setStatus(null);
+    // The single-request page embeds the tree (see _index_page in server.py);
+    // fall back to fetching it when served as plain static files.
+    if (window.__NBT_TREE__) {
+      tree = window.__NBT_TREE__;
+    } else {
+      setStatus("loading server tree…");
+      tree = await api("/api/tree");
+      setStatus(null);
+    }
     for (const s of tree.servers) sbOpen.add(s.name);
     renderSidebar();
     const mp = location.hash.match(/^#path=(.+)$/);

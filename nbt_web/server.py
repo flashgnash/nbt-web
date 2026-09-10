@@ -606,6 +606,33 @@ MIME = {".html": "text/html", ".js": "text/javascript", ".css": "text/css",
         ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon"}
 
 
+def _index_page() -> bytes:
+    """The whole app + its initial data in ONE response.
+
+    Inlines style.css and app.js and embeds the server tree as
+    ``window.__NBT_TREE__``, so the first paint needs a single round trip
+    instead of the serial /  -> css/js -> /api/tree chain. On a high-latency or
+    jittery link (where every round trip risks a stall) that is the difference
+    between instant and "loading forever". gzip still applies in _send.
+    """
+    css = (STATIC / "style.css").read_text()
+    js = (STATIC / "app.js").read_text()
+    html = (STATIC / "index.html").read_text()
+    try:
+        tree = json.dumps(get_tree())
+    except Exception:
+        tree = "null"
+    # `<` only appears inside JSON string values, so escaping it can't corrupt
+    # the data but does stop a stray </script> from closing the tag early.
+    tree = tree.replace("<", "\\u003c")
+    boot = f"<script>window.__NBT_TREE__={tree};</script>"
+    html = html.replace('<link rel="stylesheet" href="/style.css">',
+                        f"<style>{css}</style>")
+    html = html.replace('<script src="/app.js"></script>',
+                        f"{boot}<script>{js}</script>")
+    return html.encode()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -663,6 +690,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/backups":
                 q = parse_qs(url.query)
                 return self._json(200, list_backups(q.get("path", [""])[0]))
+            if url.path in ("/", ""):
+                return self._send(200, _index_page(), "text/html")
             return self._static(url.path)
         except ApiError as e:
             return self._json(e.status, {"error": str(e)})
