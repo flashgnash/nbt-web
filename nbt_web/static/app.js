@@ -783,9 +783,9 @@ const ACC = {
   },
 };
 
-// a slot/handler's own name, used to label an inventory nicely (curios
-// Identifier = "head"/"ring"/…, an accessory type name, etc.)
-const NAME_KEYS = ["Identifier", "Name", "name", "Type", "type"];
+// a slot/handler's own name, used to label a container nicely (curios
+// Identifier = "head"/"ring"/…, a mekanism frequency name, a keyed tank, …)
+const NAME_KEYS = ["Identifier", "Name", "name", "Type", "type", "key"];
 // generic wrapper segments worth hiding from a label — these are container
 // plumbing, not information (curios/accessories/forge cap boilerplate).
 const NOISE_SEG = new Set([
@@ -831,6 +831,74 @@ function findItemLists(node) {
         walk(n.v[k], path ? path + "." + k : k, parts.concat(k), depth + 1);
   })(node, "", [], 0);
   return out;
+}
+
+// ---- blanket "stack" model: an item OR a fluid/chemical, wherever stored ----
+//
+// A stack is a compound carrying a resource-location name plus a quantity. That
+// one shape covers vanilla/modded ITEMS ({id, count/Count, components/tag}),
+// FLUIDS ({FluidName, Amount}) and mekanism-style CHEMICALS ({gasName, amount},
+// …) — so tanks, ender-chest frequencies, curios, backpacks etc. are all found
+// by shape, with no per-mod code. Effects/attributes carry an id too but are
+// excluded by their giveaway keys.
+
+const STACK_ID_KEYS = ["id", "FluidName", "fluid", "gasName", "slurryName",
+                       "pigmentName", "infuseTypeName"];
+const STACK_QTY_KEYS = ["count", "Count", "amount", "Amount"];
+const NON_STACK_KEYS = ["operation", "base", "amplifier", "duration"];
+
+function stackInfo(n) {
+  if (!n || n.t !== "compound" || !n.v) return null;
+  if (NON_STACK_KEYS.some((k) => k in n.v)) return null;
+  const idKey = STACK_ID_KEYS.find((k) => n.v[k] && n.v[k].t === "string" && RES_LOC.test(n.v[k].v));
+  if (!idKey) return null;
+  const qtyKey = STACK_QTY_KEYS.find((k) => n.v[k] && !CONTAINERS.has(n.v[k].t));
+  if (!qtyKey && !("components" in n.v) && !("tag" in n.v)) return null;
+  return { kind: idKey === "id" ? "item" : "fluid", idKey, qtyKey, node: n };
+}
+
+const pathLeaf = (p) => (p.split(/[.[]/).filter(Boolean).pop() || p).replace(/]/g, "");
+
+// Every stack in the file, grouped by its nearest named container (a mekanism
+// frequency's name, a curios slot's Identifier, a keyed tank, else the holding
+// list/key). `owner` (a list + index) is set only when the stack — or its
+// single wrapper — is a direct list element, so deletion removes just that slot.
+function findStacks(root) {
+  const out = [];
+  (function walk(n, key, group, sinceList, owner, depth) {
+    if (!n || depth > 24 || out.length >= 600) return;
+    const s = stackInfo(n);
+    if (s) {
+      out.push({ ...s, group: group || { key: key || "root", label: pathLeaf(key) || "items" },
+                 owner: (owner && sinceList <= 1) ? owner : null });
+      return;
+    }
+    if (n.t === "list") {
+      const direct = n.v.some(stackInfo);
+      const listGroup = group || (direct ? { key: key, label: pathLeaf(key) } : null);
+      n.v.forEach((c, i) => {
+        if (!c) return;
+        const cg = direct ? listGroup
+          : { key: `${key}[${i}]`, label: nameOf(c) || `${pathLeaf(key)} ${i + 1}` };
+        walk(c, `${key}[${i}]`, cg, 0, { list: n, index: i }, depth + 1);
+      });
+      return;
+    }
+    if (n.t === "compound")
+      for (const k of Object.keys(n.v))
+        walk(n.v[k], key ? key + "." + k : k, group, sinceList + 1, owner, depth + 1);
+  })(root, "", null, 99, null, 0);
+  return out;
+}
+
+function storageGroups(root) {
+  const groups = new Map();
+  for (const s of findStacks(root)) {
+    let g = groups.get(s.group.key);
+    if (!g) { g = { label: s.group.label, stacks: [] }; groups.set(s.group.key, g); }
+    g.stacks.push(s);
+  }
+  return groups;
 }
 
 // every inventory-shaped list in the file: Inventory + EnderItems first,
@@ -1457,10 +1525,10 @@ function openInventoryModal(label, node, style) {
 
 const GAMEMODES = ["survival", "creative", "adventure", "spectator"];
 
-function viewTabs() {
+function viewTabs(modes) {
   const bar = document.createElement("div");
   bar.className = "view-tabs";
-  for (const [id, label] of [["player", "player"], ["raw", "raw nbt"]]) {
+  for (const [id, label] of modes) {
     const t = document.createElement("div");
     t.className = "view-tab" + (viewMode === id ? " active" : "");
     t.textContent = label;
@@ -1974,6 +2042,68 @@ function renderPlayerView() {
   return layout;
 }
 
+// -------------------------------------------------------- storage view
+//
+// The blanket view: every stack (item or fluid) in the file, grouped by its
+// container, editable in place. Works for any file — playerdata, ender-chest
+// frequency saves, shared-tank saves, backpack saves — with no per-mod code.
+
+function renderStackRow(s, rerender) {
+  const row = document.createElement("div");
+  row.className = "stack-row";
+  const idNode = s.node.v[s.idKey];
+  const combo = comboBox({
+    options: s.kind === "item" ? itemIds : [],
+    initial: String(idNode.v),
+    iconKind: s.kind === "item" ? "item" : null,
+    onChange: (v) => {
+      idNode.v = (v.includes(":") || !v) ? v : "minecraft:" + v;
+      setDirty(true);
+    },
+  });
+  row.appendChild(combo.el);
+  if (s.qtyKey) {
+    const qty = boundInput(s.node.v[s.qtyKey], "num");
+    row.appendChild(qty);
+  }
+  if (s.owner) {
+    const del = document.createElement("button");
+    del.className = "mini-btn del";
+    del.textContent = "×";
+    del.title = "remove this slot";
+    del.addEventListener("click", () => {
+      s.owner.list.v.splice(s.owner.index, 1);
+      setDirty(true);
+      rerender();
+    });
+    row.appendChild(del);
+  }
+  return row;
+}
+
+function renderStorageView() {
+  const wrap = document.createElement("div");
+  wrap.className = "pv-main";
+  const render = () => {
+    wrap.textContent = "";
+    const groups = storageGroups(file.root);
+    if (!groups.size) {
+      const d = document.createElement("div");
+      d.className = "dim";
+      d.textContent = "No stored items or fluids found in this file.";
+      wrap.appendChild(d);
+      return;
+    }
+    for (const [, g] of groups) {
+      const c = card(g.label, false);
+      for (const s of g.stacks) c.body.appendChild(renderStackRow(s, render));
+      wrap.appendChild(c);
+    }
+  };
+  render();
+  return wrap;
+}
+
 // -------------------------------------------------------- server view
 //
 // Clicking a server in the sidebar shows a grid of player cards (3D
@@ -2277,12 +2407,16 @@ function renderEditor() {
   const ctx = playerCtx(file.path);
   if (ctx && ctx.player.files.length > 1) el.appendChild(playerFileTabs(ctx));
   const player = isPlayerFile(file);
-  $("filter").hidden = player && viewMode === "player";
-  if (player) el.appendChild(viewTabs());
-  if (player && viewMode === "player") {
-    el.appendChild(renderPlayerView());
-    return;
-  }
+  const hasStorage = !player && findStacks(file.root).length > 0;
+  const modes = [];
+  if (player) modes.push(["player", "player"]);
+  if (hasStorage) modes.push(["storage", "storage"]);
+  modes.push(["raw", "raw nbt"]);
+  if (!modes.some((m) => m[0] === viewMode)) viewMode = modes[0][0];
+  $("filter").hidden = viewMode !== "raw";
+  if (modes.length > 1) el.appendChild(viewTabs(modes));
+  if (viewMode === "player") { el.appendChild(renderPlayerView()); return; }
+  if (viewMode === "storage") { el.appendChild(renderStorageView()); return; }
   const q = $("filter").value.trim().toLowerCase();
   el.appendChild(renderNode(file.root, file.rootName || "(root)", "$", null, q));
 }
@@ -2323,7 +2457,8 @@ async function openFile(path, label, row) {
     currentServer = null;
     expanded.clear();
     expanded.add("$");
-    viewMode = isPlayerFile(file) ? "player" : "raw";
+    viewMode = isPlayerFile(file) ? "player"
+      : (findStacks(file.root).length ? "storage" : "raw");
     invState.rootKey = null;
     invState.stack = [];
     invState.query = "";

@@ -521,6 +521,10 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 .field-row .field { flex: 1; }
 
 /* styled autocomplete (replaces the un-themeable native datalist popup) */
+.stack-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.stack-row .combo { flex: 1; }
+.stack-row .pv-input.num { max-width: 110px; }
+
 .combo { position: relative; flex: 1; min-width: 0; }
 .combo-field { display: flex; align-items: center; gap: 8px; }
 .combo-field .pv-input { flex: 1; min-width: 0; }
