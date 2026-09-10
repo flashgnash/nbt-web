@@ -21,6 +21,10 @@ let tagMatches = [];
 let tagSel = -1;
 
 let effectIdsLoaded = null;        // server whose effect datalist is loaded
+let effectIds = [];                // known effect ids for the current server
+
+// Potion duration is a signed 32-bit int of ticks; the game can't hold more.
+const DURATION_MAX = 2147483647;
 
 const CONTAINERS = new Set(["compound", "list", "byteArray", "intArray", "longArray"]);
 const NUMS = { byte: [-128n, 127n], short: [-32768n, 32767n], int: [-2147483648n, 2147483647n],
@@ -85,6 +89,8 @@ function flatEntries() {
       out.push({ label: `${s.name} / ${w.name}`, sub: "level.dat", path: w.level });
       for (const d of w.data)
         out.push({ label: `${s.name} / ${w.name} / ${d.label}`, sub: "data", path: d.path });
+      for (const d of w.playerdata || [])
+        out.push({ label: `${s.name} / ${w.name} / playerdata / ${d.label}`, sub: "playerdata", path: d.path });
     }
   }
   return out;
@@ -187,6 +193,14 @@ function renderSidebar() {
         for (const d of w.data) dkids.appendChild(fileRow(d.label, d.path));
         wkids.appendChild(groupRow("data", `${s.name}/${w.name}/d`, w.data.length, dkids));
         wkids.appendChild(dkids);
+      }
+      const pd = w.playerdata || [];
+      if (pd.length) {
+        const pkids2 = document.createElement("div");
+        pkids2.className = "tree-indent";
+        for (const d of pd) pkids2.appendChild(fileRow(d.label, d.path));
+        wkids.appendChild(groupRow("playerdata", `${s.name}/${w.name}/pd`, pd.length, pkids2));
+        wkids.appendChild(pkids2);
       }
       kids.appendChild(groupRow(w.name, `${s.name}/${w.name}`, null, wkids));
       kids.appendChild(wkids);
@@ -1465,55 +1479,6 @@ function effectsList() {
   return { list, modern };
 }
 
-function quickActionsCard() {
-  const r = file.root;
-  const c = card("quick actions");
-  const p = tpath(r, "Pos");
-  if (p && p.t === "list" && p.v.length === 3) {
-    const ctls = frow(c.body, "teleport");
-    const ins = p.v.map((n) => {
-      const i = document.createElement("input");
-      i.type = "text";
-      i.className = "pv-input coord";
-      i.value = Math.round(Number(n.v) * 100) / 100;
-      ctls.appendChild(i);
-      return i;
-    });
-    const go = document.createElement("button");
-    go.className = "btn primary";
-    go.textContent = "go";
-    go.addEventListener("click", () => {
-      try {
-        ins.forEach((i, k) => { p.v[k].v = validateScalar(p.v[k].t, i.value); });
-        setDirty(true);
-        setStatus("position set", "ok");
-        renderEditor();
-      } catch (e) { setStatus(String(e.message || e), "err"); }
-    });
-    ctls.appendChild(go);
-  }
-  const btns = document.createElement("div");
-  btns.className = "qa-btns";
-  const heal = document.createElement("button");
-  heal.className = "btn";
-  heal.textContent = "full heal";
-  heal.addEventListener("click", () => {
-    const h = tpath(r, "Health");
-    if (h) { h.v = maxHealth(); setDirty(true); renderEditor(); }
-  });
-  btns.appendChild(heal);
-  const clear = document.createElement("button");
-  clear.className = "btn";
-  clear.textContent = "clear effects";
-  clear.addEventListener("click", () => {
-    const { list } = effectsList();
-    if (list && list.v.length) { list.v = []; setDirty(true); renderEditor(); }
-  });
-  btns.appendChild(clear);
-  c.body.appendChild(btns);
-  return c;
-}
-
 async function loadEffectIds() {
   const server = fileServer();
   if (!server || effectIdsLoaded === server) return;
@@ -1521,6 +1486,7 @@ async function loadEffectIds() {
   try { mod = (await api("/api/effects?server=" + encodeURIComponent(server))).effects; }
   catch { /* mods dir may not exist */ }
   const all = [...new Set([...VANILLA_EFFECTS, ...mod])].sort();
+  effectIds = all;
   const dl = $("effect-ids");
   dl.textContent = "";
   for (const id of all) {
@@ -1531,51 +1497,82 @@ async function loadEffectIds() {
   effectIdsLoaded = server;
 }
 
+// Styled autocomplete: a text input sitting over a themed dropdown (a native
+// <datalist> can't be styled). Filters options as you type, highlights the
+// best match first, arrow keys move the highlight, Enter/click commits it.
+// Returns { el, input, value() }. onEnter (optional) fires when Enter is
+// pressed with the menu already closed (e.g. to submit the surrounding form).
+function comboBox(options, placeholder, onEnter) {
+  const wrap = document.createElement("div");
+  wrap.className = "combo";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "pv-input wide";
+  input.placeholder = placeholder || "";
+  input.autocomplete = "off";
+  const menu = document.createElement("div");
+  menu.className = "combo-menu";
+  menu.hidden = true;
+  wrap.appendChild(input);
+  wrap.appendChild(menu);
+
+  let matches = [];
+  let sel = -1;
+
+  const rebuild = () => {
+    const q = input.value.trim().toLowerCase();
+    let pool = q ? options.filter((o) => o.toLowerCase().includes(q)) : options.slice();
+    if (q) pool.sort((a, b) =>
+      (a.toLowerCase().startsWith(q) ? 0 : 1) - (b.toLowerCase().startsWith(q) ? 0 : 1));
+    matches = pool.slice(0, 60);
+    sel = matches.length ? 0 : -1;   // first match is the default pick
+    paint();
+  };
+  const paint = () => {
+    menu.textContent = "";
+    if (!matches.length) { menu.hidden = true; return; }
+    menu.hidden = false;
+    matches.forEach((m, i) => {
+      const row = document.createElement("div");
+      row.className = "combo-row" + (i === sel ? " sel" : "");
+      row.textContent = m;
+      row.addEventListener("mousedown", (ev) => { ev.preventDefault(); commit(m); });
+      menu.appendChild(row);
+    });
+    const cur = menu.children[sel];
+    if (cur) cur.scrollIntoView({ block: "nearest" });
+  };
+  const commit = (val) => { input.value = val; matches = []; sel = -1; menu.hidden = true; };
+
+  input.addEventListener("input", rebuild);
+  input.addEventListener("focus", rebuild);
+  input.addEventListener("blur", () => setTimeout(() => { menu.hidden = true; }, 120));
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowDown" && matches.length) {
+      ev.preventDefault(); sel = (sel + 1) % matches.length; paint();
+    } else if (ev.key === "ArrowUp" && matches.length) {
+      ev.preventDefault(); sel = (sel - 1 + matches.length) % matches.length; paint();
+    } else if (ev.key === "Enter") {
+      if (!menu.hidden && sel >= 0) { ev.preventDefault(); commit(matches[sel]); }
+      else if (onEnter) { ev.preventDefault(); onEnter(); }
+    } else if (ev.key === "Escape" && !menu.hidden) {
+      ev.stopPropagation(); menu.hidden = true;
+    }
+  });
+
+  return { el: wrap, input, value: () => input.value };
+}
+
 function openEffectModal() {
-  const { list, modern } = effectsList();
+  const { modern } = effectsList();
   const shell = modalShell("add effect");
   const b = shell.body;
 
-  const idCtls = frow(b, "effect");
-  const idInput = document.createElement("input");
-  idInput.type = "text";
-  idInput.className = "pv-input wide";
-  idInput.setAttribute("list", "effect-ids");
-  idInput.placeholder = modern ? "minecraft:speed" : "numeric id";
-  idInput.value = modern ? "" : "1";
-  idCtls.appendChild(idInput);
-
-  const ampCtls = frow(b, "amplifier");
-  const amp = document.createElement("input");
-  amp.type = "text";
-  amp.className = "pv-input count";
-  amp.value = "0";
-  ampCtls.appendChild(amp);
-
-  const durCtls = frow(b, "duration");
-  const dur = document.createElement("input");
-  dur.type = "text";
-  dur.className = "pv-input num";
-  dur.value = "1200";
-  durCtls.appendChild(dur);
-
-  const foot = document.createElement("div");
-  foot.className = "modal-foot";
-  const spacer = document.createElement("span");
-  spacer.className = "spacer";
-  foot.appendChild(spacer);
-  const cancel = document.createElement("button");
-  cancel.className = "btn";
-  cancel.textContent = "cancel";
-  cancel.addEventListener("click", shell.close);
-  foot.appendChild(cancel);
-  const add = document.createElement("button");
-  add.className = "btn primary";
-  add.textContent = "add";
-  add.addEventListener("click", () => {
+  const submit = () => {
     try {
       const a = validateScalar("byte", amp.value);
-      const d = validateScalar("int", dur.value);
+      let d = validateScalar("int", dur.value);
+      if (d > DURATION_MAX) d = DURATION_MAX;   // game engine's hard cap
       let target = effectsList().list;
       if (!target) {
         const key = modern ? "active_effects" : "ActiveEffects";
@@ -1583,7 +1580,7 @@ function openEffectModal() {
         target = file.root.v[key];
       }
       if (modern) {
-        let id = idInput.value.trim();
+        let id = combo.value().trim();
         if (!id) throw new Error("effect id required");
         if (!id.includes(":")) id = "minecraft:" + id;
         target.v.push({ t: "compound", v: {
@@ -1595,7 +1592,7 @@ function openEffectModal() {
           show_icon: { t: "byte", v: 1 },
         }});
       } else {
-        const num = Number(idInput.value.trim());
+        const num = Number(combo.value().trim());
         if (!Number.isInteger(num)) throw new Error("this file uses numeric effect ids");
         target.v.push({ t: "compound", v: {
           Id: { t: "int", v: num },
@@ -1610,10 +1607,69 @@ function openEffectModal() {
       shell.close();
       renderEditor();
     } catch (e) { setStatus(String(e.message || e), "err"); }
-  });
+  };
+
+  const idField = document.createElement("div");
+  idField.className = "field";
+  const idLabel = document.createElement("span");
+  idLabel.className = "field-label";
+  idLabel.textContent = "effect";
+  idField.appendChild(idLabel);
+  const combo = comboBox(modern ? effectIds : [], modern ? "minecraft:speed" : "numeric id", submit);
+  if (!modern) combo.input.value = "1";
+  idField.appendChild(combo.el);
+  b.appendChild(idField);
+
+  // amplifier + duration side by side, labels stacked above each input
+  const row = document.createElement("div");
+  row.className = "field-row";
+  const ampField = document.createElement("div");
+  ampField.className = "field";
+  const ampLabel = document.createElement("span");
+  ampLabel.className = "field-label";
+  ampLabel.textContent = "amplifier";
+  const amp = document.createElement("input");
+  amp.type = "text";
+  amp.className = "pv-input";
+  amp.value = "0";
+  ampField.appendChild(ampLabel);
+  ampField.appendChild(amp);
+  const durField = document.createElement("div");
+  durField.className = "field";
+  const durLabel = document.createElement("span");
+  durLabel.className = "field-label";
+  durLabel.textContent = "duration";
+  const dur = document.createElement("input");
+  dur.type = "text";
+  dur.className = "pv-input";
+  dur.value = "1200";
+  dur.setAttribute("max", String(DURATION_MAX));
+  durField.appendChild(durLabel);
+  durField.appendChild(dur);
+  row.appendChild(ampField);
+  row.appendChild(durField);
+  b.appendChild(row);
+
+  for (const inp of [amp, dur])
+    inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); submit(); } });
+
+  const foot = document.createElement("div");
+  foot.className = "modal-foot";
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  foot.appendChild(spacer);
+  const cancel = document.createElement("button");
+  cancel.className = "btn";
+  cancel.textContent = "cancel";
+  cancel.addEventListener("click", shell.close);
+  foot.appendChild(cancel);
+  const add = document.createElement("button");
+  add.className = "btn primary";
+  add.textContent = "add";
+  add.addEventListener("click", submit);
   foot.appendChild(add);
   b.appendChild(foot);
-  idInput.focus();
+  combo.input.focus();
 }
 
 function effectsCard() {
@@ -1702,15 +1758,14 @@ function renderPlayerView() {
   const side = document.createElement("div");
   side.className = "pv-side";
 
-  main.appendChild(positionCard());
   main.appendChild(abilitiesCard());
   main.appendChild(experienceCard());
-  const sp = spawnCard();
-  if (sp) main.appendChild(sp);
   main.appendChild(effectsCard());
   main.appendChild(itemsCard());
 
-  side.appendChild(quickActionsCard());
+  side.appendChild(positionCard());
+  const sp = spawnCard();
+  if (sp) side.appendChild(sp);
   side.appendChild(vitalsCard());
 
   layout.appendChild(main);
@@ -1795,6 +1850,27 @@ function openServerView(s) {
   renderEditor();
 }
 
+// Lay a wrapped set of equal-width items into balanced rows: pick the most
+// columns that fit the container, then trim that back so the items spread
+// evenly across the *same* number of rows — 5 items in a 4-wide space become
+// 3+2, never 4+1. Re-runs on resize. Used for every uniform card/tile grid.
+function balancedGrid(el, itemPx, gap = 14) {
+  el.style.display = "grid";
+  el.style.justifyContent = "center";
+  const relayout = () => {
+    const n = el.children.length;
+    const w = el.clientWidth;
+    if (!n || !w) return;
+    const maxCols = Math.max(1, Math.floor((w + gap) / (itemPx + gap)));
+    const rows = Math.ceil(n / maxCols);
+    const cols = Math.ceil(n / rows);
+    el.style.gap = gap + "px";
+    el.style.gridTemplateColumns = `repeat(${cols}, ${itemPx}px)`;
+  };
+  relayout();
+  new ResizeObserver(relayout).observe(el);
+}
+
 function renderServerView(s) {
   const wrap = document.createElement("div");
   wrap.className = "server-view";
@@ -1814,6 +1890,21 @@ function renderServerView(s) {
     players.appendChild(cardEl);
   });
   wrap.appendChild(players);
+  if (s.players && s.players.length) balancedGrid(players, 152);
+
+  // Flatten every world's files into one wrapped list. The "world /" (or
+  // whatever the single dir is called) prefix only earns its keep when there
+  // is more than one directory to tell apart — with a single world, drop it.
+  const entries = [];
+  for (const w of s.worlds) {
+    entries.push({ dir: w.name, label: "level.dat", path: w.level,
+                   title: `${s.name} / ${w.name}` });
+    for (const d of w.data)
+      entries.push({ dir: w.name, label: d.label, path: d.path,
+                     title: `${s.name} / ${w.name} / ${d.label}` });
+  }
+  const dirs = new Set(entries.map((e) => e.dir));
+  const showDir = dirs.size > 1;
 
   const files = document.createElement("div");
   files.className = "sv-files";
@@ -1821,22 +1912,22 @@ function renderServerView(s) {
   title.className = "card-title";
   title.textContent = "files";
   files.appendChild(title);
-  for (const w of s.worlds) {
+  const list = document.createElement("div");
+  list.className = "sv-file-list";
+  for (const e of entries) {
     const b = document.createElement("button");
     b.className = "sv-file";
-    b.textContent = `${w.name} / level.dat`;
-    b.addEventListener("click", () => openFile(w.level, `${s.name} / ${w.name}`));
-    files.appendChild(b);
-    for (const d of w.data) {
-      const db = document.createElement("button");
-      db.className = "sv-file";
-      db.textContent = `${w.name} / ${d.label}`;
-      db.addEventListener("click", () =>
-        openFile(d.path, `${s.name} / ${w.name} / ${d.label}`));
-      files.appendChild(db);
-    }
+    b.textContent = showDir ? `${e.dir} / ${e.label}` : e.label;
+    b.addEventListener("click", () => openFile(e.path, e.title));
+    list.appendChild(b);
   }
+  files.appendChild(list);
   wrap.appendChild(files);
+
+  // Warm the cache for everything reachable from this screen so the first
+  // click opens instantly instead of parsing on demand.
+  prefetchFiles([...(s.players || []).map((p) => p.files[0].path),
+                 ...entries.map((e) => e.path)]);
   return wrap;
 }
 
@@ -1977,6 +2068,25 @@ async function api(url, opts) {
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || res.statusText);
   return body;
+}
+
+// Warm the server's parse cache for files the user is likely to open next
+// (everything linked from the screen they just loaded), so the first click is
+// instant. Best-effort and low-priority: each path is fetched once ever, a few
+// at a time, and failures are ignored.
+const prefetched = new Set();
+async function prefetchFiles(paths) {
+  const queue = [...new Set(paths)].filter((p) => p && !prefetched.has(p));
+  queue.forEach((p) => prefetched.add(p));
+  const CONCURRENCY = 4;
+  const worker = async () => {
+    while (queue.length) {
+      const p = queue.shift();
+      try { await fetch("/api/prefetch?path=" + encodeURIComponent(p)); }
+      catch { prefetched.delete(p); }
+    }
+  };
+  for (let i = 0; i < CONCURRENCY; i++) worker();
 }
 
 async function openFile(path, label, row) {

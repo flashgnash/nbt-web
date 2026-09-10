@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -157,10 +158,25 @@ def discover_tree() -> dict:
             ddir = wd / "data"
             if ddir.is_dir():
                 data = [{"label": f.name, "path": _rel(f)} for f in sorted(ddir.glob("*.dat"))]
+            # The raw playerdata dir is listed directly (not via the player
+            # heuristic) so its files always stay browsable in the tree even
+            # when they don't map into the nicer per-player abstraction — e.g.
+            # a Folia world whose players never got matched. A targeted glob
+            # also dodges the whole-tree walk aborting early on an unreadable
+            # sibling dir.
+            pdata = []
+            pddir = wd / "playerdata"
+            if pddir.is_dir():
+                for f in sorted([*pddir.glob("*.dat"), *pddir.glob("*.dat_old")]):
+                    label = names.get(f.stem.lower(), f.stem)
+                    if f.suffix == ".dat_old":
+                        label += " (old)"
+                    pdata.append({"label": label, "path": _rel(f)})
             worlds.append({
                 "name": str(wd.relative_to(sd)),
                 "level": _rel(wd / "level.dat"),
                 "data": data,
+                "playerdata": pdata,
             })
         if worlds or players:
             servers.append({
@@ -227,8 +243,23 @@ def _prewarm():
     _rebuild_tree()
     with _tree_lock:
         data = _tree_cache["data"]
+    servers = (data or {}).get("servers", [])
+    # parse + cache every player's <uuid>.dat so opening a player is instant
+    warmed = 0
+    for s in servers:
+        for pl in s.get("players", []):
+            for fe in pl.get("files", []):
+                if fe["label"] != "playerdata":
+                    continue
+                try:
+                    read_nbt(fe["path"])
+                    warmed += 1
+                except ApiError:
+                    pass
+    if warmed:
+        print(f"nbt-web warmed {warmed} playerdata file(s)", flush=True)
     # icon indexes warm in tree order = most recently active server first
-    for s in (data or {}).get("servers", []):
+    for s in servers:
         sd = ROOT / s["name"]
         if sd.is_dir():
             _icon_index(sd)
@@ -313,10 +344,24 @@ def _safe_path(rel: str) -> Path:
     return p
 
 
-def read_nbt(rel: str) -> dict:
-    p = _safe_path(rel)
-    if not p.is_file():
-        raise ApiError(404, "no such file")
+# Parsed NBT is cached in memory so re-opening a file is instant. Playerdata
+# (the per-player <uuid>.dat files) is warmed at boot; anything else is cached
+# lazily as it is read or prefetched. The cache is a bounded LRU so memory
+# stays in check no matter how many files get touched — the least-recently
+# used entry is evicted once the cap is reached. Entries are keyed by relative
+# path and validated against (mtime, size) so an external edit is picked up,
+# and are dropped on our own writes/restores.
+
+FILE_CACHE_MAX = 512
+_file_cache = OrderedDict()   # rel -> ((mtime, size), data dict)  [LRU order]
+_file_cache_lock = threading.Lock()
+
+
+def _is_playerdata(p: Path) -> bool:
+    return p.parent.name == "playerdata" and p.suffix == ".dat"
+
+
+def _parse_nbt(p: Path, rel: str) -> dict:
     try:
         f = nbtlib.load(str(p))
     except Exception as e:  # corrupt / not actually NBT
@@ -327,6 +372,31 @@ def read_nbt(rel: str) -> dict:
         "rootName": getattr(f, "root_name", "") or "",
         "root": tag_to_json(T.Compound(dict(f))),
     }
+
+
+def _invalidate_cache(rel: str):
+    with _file_cache_lock:
+        _file_cache.pop(rel, None)
+
+
+def read_nbt(rel: str) -> dict:
+    p = _safe_path(rel)
+    if not p.is_file():
+        raise ApiError(404, "no such file")
+    st = p.stat()
+    stamp = (st.st_mtime, st.st_size)
+    with _file_cache_lock:
+        c = _file_cache.get(rel)
+        if c is not None and c[0] == stamp:
+            _file_cache.move_to_end(rel)
+            return c[1]
+    data = _parse_nbt(p, rel)
+    with _file_cache_lock:
+        _file_cache[rel] = (stamp, data)
+        _file_cache.move_to_end(rel)
+        while len(_file_cache) > FILE_CACHE_MAX:
+            _file_cache.popitem(last=False)
+    return data
 
 
 def write_nbt(rel: str, payload: dict) -> dict:
@@ -363,6 +433,7 @@ def write_nbt(rel: str, payload: dict) -> dict:
             except OSError:
                 pass
             raise
+    _invalidate_cache(rel)
     return {"ok": True, "backup": p.name + ".nbtweb.bak"}
 
 
@@ -424,6 +495,7 @@ def restore_backup(rel: str, name: str) -> dict:
             except OSError:
                 pass
             raise
+    _invalidate_cache(rel)
     return {"ok": True, "restored": name}
 
 
@@ -541,6 +613,12 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/file":
                 rel = parse_qs(url.query).get("path", [""])[0]
                 return self._json(200, read_nbt(rel))
+            if url.path == "/api/prefetch":
+                # Parse + cache without shipping the (large) payload back —
+                # used to warm files linked from a screen the client opened.
+                rel = parse_qs(url.query).get("path", [""])[0]
+                read_nbt(rel)
+                return self._json(200, {"ok": True})
             if url.path == "/api/icon":
                 q = parse_qs(url.query)
                 png = read_icon(q.get("server", [""])[0], q.get("id", [""])[0],
