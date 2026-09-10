@@ -291,8 +291,11 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 .card-body { display: flex; flex-direction: column; gap: 8px; }
 
 .frow { display: flex; align-items: center; gap: 8px; min-height: 28px; }
-.flabel { color: var(--dim); font-size: 13px; width: 92px; flex: 0 0 auto; }
+.flabel { color: var(--dim); font-size: 13px; width: 92px; flex: 0 0 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fctls { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+/* modal frow: flexible truncating label; controls sit right (bugs 3+4) */
+.modal-body .frow .flabel { flex: 1; width: auto; }
+.modal-body .frow .fctls { flex: 1; justify-content: flex-end; }
 
 .pv-label { color: var(--dim); font-size: 13px; white-space: nowrap; }
 .pv-hint { color: var(--dim); font-size: 11px; }
@@ -360,7 +363,7 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   border-radius: 50%;
   background: var(--accent);
 }
-.msl-pct { width: 40px; text-align: right; }
+.msl-pct { min-width: 80px; text-align: right; }
 
 
 /* ------------------------------------------------------------ effects */
@@ -511,11 +514,12 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px;
-  width: min(520px, 92vw);
+  min-width: min(480px, 92vw);
+  max-width: min(680px, 94vw);
   max-height: 85vh;
   overflow: auto;
 }
-.modal.wide { width: min(780px, 94vw); }
+.modal.wide { min-width: min(780px, 94vw); max-width: min(860px, 96vw); }
 .modal-head { display: flex; align-items: center; margin-bottom: 12px; }
 .modal-title { color: var(--accent); font-weight: bold; flex: 1; }
 .modal-body { display: flex; flex-direction: column; gap: 10px; }
@@ -696,6 +700,7 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   .modal,
   .modal.wide {
     width: 100dvw;
+    min-width: 0;
     max-width: none;
     max-height: 100dvh;
     border-radius: 0;
