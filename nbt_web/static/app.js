@@ -2835,9 +2835,17 @@ function skinBox(player, idx) {
   fallback.textContent = (player.label[0] || "?").toUpperCase();
   box.appendChild(fallback);
 
+  // Minecraft playerdata files are named with dashed UUIDs; skin services want
+  // the trimmed (undashed) form — the dashed form makes some of them 404 or
+  // fall back to the default Alex/Steve. mc-heads.net serves both the 3D
+  // texture and the flat body (one reliable, CORS-enabled origin); crafatar.com
+  // was previously the 3D source but is frequently unreachable/deprecated.
+  const uuid = String(player.uuid).replace(/-/g, "");
+  const skinUrl = `https://mc-heads.net/skin/${uuid}`;
+
   const flat = () => {
     const img = document.createElement("img");
-    img.src = `https://mc-heads.net/body/${player.uuid}/120`;
+    img.src = `https://mc-heads.net/body/${uuid}/120`;
     img.alt = "";
     img.onload = () => { fallback.remove(); };
     img.onerror = () => img.remove();
@@ -2851,11 +2859,11 @@ function skinBox(player, idx) {
       const canvas = document.createElement("canvas");
       const viewer = new skinview3d.SkinViewer({
         canvas, width: 120, height: 160,
-        skin: `https://crafatar.com/skins/${player.uuid}`,
+        skin: skinUrl,
       });
       viewer.autoRotate = true;
       viewer.zoom = 0.9;
-      viewer.loadSkin(`https://crafatar.com/skins/${player.uuid}`).then(
+      viewer.loadSkin(skinUrl).then(
         () => { fallback.remove(); box.appendChild(canvas); },
         () => { viewer.dispose(); flat(); });
     } catch { flat(); }
