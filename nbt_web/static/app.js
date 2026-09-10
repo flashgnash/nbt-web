@@ -2816,6 +2816,7 @@ function openServerView(s) {
   if (activeRow) { activeRow.classList.remove("active"); activeRow = null; }
   setStatus(null);
   renderEditor();
+  collapseSidebar();
 }
 
 // Lay a wrapped set of equal-width items into balanced rows: pick the most
@@ -3227,6 +3228,7 @@ async function openFile(path, label, row) {
     loadEffectIds();
     loadItemIds();
     renderEditor();
+    collapseSidebar();
   } catch (e) {
     setStatus("open failed: " + e.message, "err");
   }
@@ -3311,6 +3313,14 @@ async function toggleRestoreMenu() {
 }
 
 // ---------------------------------------------------------------- init
+
+function collapseSidebar() {
+  if (window.innerWidth <= 720) $("sidebar").classList.remove("open");
+}
+
+$("sidebar-toggle").addEventListener("click", () => {
+  $("sidebar").classList.toggle("open");
+});
 
 $("search").addEventListener("input", renderSidebar);
 $("filter").addEventListener("input", renderEditor);
