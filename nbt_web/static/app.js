@@ -3321,6 +3321,7 @@ function collapseSidebar() {
 $("sidebar-toggle").addEventListener("click", () => {
   $("sidebar").classList.toggle("open");
 });
+$("sidebar-backdrop").addEventListener("click", collapseSidebar);
 
 $("search").addEventListener("input", renderSidebar);
 $("filter").addEventListener("input", renderEditor);
