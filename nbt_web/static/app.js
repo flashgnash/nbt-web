@@ -8,16 +8,28 @@ let tree = null;          // /api/tree result
 let file = null;          // /api/file result (model, mutated in place)
 let dirty = false;
 let viewMode = "raw";     // "player" | "raw" (player only for playerdata files)
-let selectedSlot = null;  // {grid: "inv"|"ender", slot: n} — open item editor
 let activeRow = null;     // sidebar DOM row of the open file
 const expanded = new Set(["$"]);   // editor node paths expanded
 const sbOpen = new Set();          // sidebar group keys expanded
+
+// inventory browser (player view) — reset per file
+let invRootKey = null;    // which root inventory the crumb dropdown shows
+let invStack = [];        // [{label, panes: [{caption, node, style}]}]
+let invSel = null;        // {pane: idx, slot: n} — open item editor
+let invQuery = "";        // slot fuzzy filter
+
+// global tag-path search
+let tagMatches = [];
+let tagSel = -1;
 
 const CONTAINERS = new Set(["compound", "list", "byteArray", "intArray", "longArray"]);
 const NUMS = { byte: [-128n, 127n], short: [-32768n, 32767n], int: [-2147483648n, 2147483647n],
                long: [-9223372036854775808n, 9223372036854775807n] };
 const TYPES = ["byte", "short", "int", "long", "float", "double", "string",
                "compound", "list", "byteArray", "intArray", "longArray"];
+
+// Vanilla textures aren't in server jars; this CDN serves them per version.
+const VANILLA_CDN = "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.21.4/assets/minecraft/textures";
 
 function setStatus(msg, cls) {
   const el = $("status");
@@ -29,6 +41,7 @@ function setStatus(msg, cls) {
 
 function setDirty(d) {
   dirty = d;
+  if (d && file) file._paths = null;   // tag-path index is stale after edits
   $("dirty").hidden = !d;
   $("save").disabled = !d;
 }
@@ -42,7 +55,7 @@ function fuzzyScore(query, text) {
   for (let ti = 0; ti < t.length && qi < q.length; ti++) {
     if (t[ti] !== q[qi]) continue;
     score += (ti === last + 1) ? 3 : 1;
-    if (ti === 0 || " /_-.".includes(t[ti - 1])) score += 2;
+    if (ti === 0 || " /_-.:".includes(t[ti - 1])) score += 2;
     last = ti; qi++;
   }
   return qi === q.length ? score : -1;
@@ -53,10 +66,11 @@ function fuzzyScore(query, text) {
 function flatEntries() {
   const out = [];
   for (const s of tree.servers) {
+    for (const p of s.players || [])
+      for (const f of p.files)
+        out.push({ label: `${s.name} / ${p.label} / ${f.label}`, sub: "player", path: f.path });
     for (const w of s.worlds) {
       out.push({ label: `${s.name} / ${w.name}`, sub: "level.dat", path: w.level });
-      for (const p of w.players)
-        out.push({ label: `${s.name} / ${w.name} / ${p.label}`, sub: "player", path: p.path });
       for (const d of w.data)
         out.push({ label: `${s.name} / ${w.name} / ${d.label}`, sub: "data", path: d.path });
     }
@@ -80,7 +94,7 @@ function fileRow(label, path, prefix) {
   return row;
 }
 
-function groupRow(label, key, count, childrenEl) {
+function groupRow(label, key, count, childrenEl, onOpen) {
   const row = document.createElement("div");
   row.className = "node-row";
   const caret = document.createElement("span");
@@ -99,6 +113,15 @@ function groupRow(label, key, count, childrenEl) {
     childrenEl.hidden = !open;
   };
   row.addEventListener("click", () => {
+    if (onOpen) {
+      // player dirs: click always opens playerdata and ensures expansion;
+      // a second click while already open+expanded collapses.
+      if (sbOpen.has(key) && file && file.path === onOpen.path) sbOpen.delete(key);
+      else sbOpen.add(key);
+      sync();
+      openFile(onOpen.path, onOpen.label);
+      return;
+    }
     sbOpen.has(key) ? sbOpen.delete(key) : sbOpen.add(key);
     sync();
   });
@@ -132,17 +155,24 @@ function renderSidebar() {
   for (const s of tree.servers) {
     const kids = document.createElement("div");
     kids.className = "tree-indent";
+
+    // players first, as directories of all their files on this server
+    for (const p of s.players || []) {
+      const pkids = document.createElement("div");
+      pkids.className = "tree-indent";
+      for (const f of p.files)
+        pkids.appendChild(fileRow(f.label, f.path));
+      const pd = p.files[0]; // playerdata is always first
+      kids.appendChild(groupRow(p.label, `${s.name}/p/${p.uuid}`,
+        p.files.length > 1 ? p.files.length : null, pkids,
+        { path: pd.path, label: `${s.name} / ${p.label} / ${pd.label}` }));
+      kids.appendChild(pkids);
+    }
+
     for (const w of s.worlds) {
       const wkids = document.createElement("div");
       wkids.className = "tree-indent";
       wkids.appendChild(fileRow("level.dat", w.level));
-      if (w.players.length) {
-        const pkids = document.createElement("div");
-        pkids.className = "tree-indent";
-        for (const p of w.players) pkids.appendChild(fileRow(p.label, p.path));
-        wkids.appendChild(groupRow("players", `${s.name}/${w.name}/p`, w.players.length, pkids));
-        wkids.appendChild(pkids);
-      }
       if (w.data.length) {
         const dkids = document.createElement("div");
         dkids.className = "tree-indent";
@@ -153,7 +183,9 @@ function renderSidebar() {
       kids.appendChild(groupRow(w.name, `${s.name}/${w.name}`, null, wkids));
       kids.appendChild(wkids);
     }
-    el.appendChild(groupRow(s.name, s.name, s.worlds.length + " worlds", kids));
+    const nP = (s.players || []).length;
+    el.appendChild(groupRow(s.name, s.name,
+      (nP ? nP + " players · " : "") + s.worlds.length + " worlds", kids));
     el.appendChild(kids);
   }
 }
@@ -189,10 +221,6 @@ function defaultValue(t) {
   if (t === "string") return "";
   if (t === "long") return "0";
   return 0;
-}
-
-function scalarDisplay(node) {
-  return String(node.v);
 }
 
 // Inline edit an element `span` whose committed value goes through `commit(raw)`.
@@ -233,7 +261,7 @@ function matchesFilter(node, key, q) {
   return false;
 }
 
-// parent: {get(), set(v), remove(), rename(newKey)} accessors, null for root
+// parent: {remove(), rename(newKey)} accessors, null for root
 function renderNode(node, key, path, parent, q) {
   const wrap = document.createElement("div");
   wrap.className = "nbt-node";
@@ -244,7 +272,6 @@ function renderNode(node, key, path, parent, q) {
   const isContainer = CONTAINERS.has(node.t);
   const isOpen = expanded.has(path);
 
-  // caret
   const caret = document.createElement("span");
   caret.className = "nbt-caret";
   caret.textContent = isContainer ? (isOpen ? "▾" : "▸") : "";
@@ -255,7 +282,6 @@ function renderNode(node, key, path, parent, q) {
     });
   row.appendChild(caret);
 
-  // key
   const keyEl = document.createElement("span");
   keyEl.className = "nbt-key";
   keyEl.textContent = key;
@@ -269,7 +295,6 @@ function renderNode(node, key, path, parent, q) {
   }
   row.appendChild(keyEl);
 
-  // type badge
   const typeEl = document.createElement("span");
   typeEl.className = "nbt-type";
   typeEl.textContent = typeLabel(node);
@@ -284,7 +309,7 @@ function renderNode(node, key, path, parent, q) {
   } else {
     const val = document.createElement("span");
     val.className = "nbt-value" + (node.t === "string" ? " str" : "");
-    val.textContent = scalarDisplay(node);
+    val.textContent = String(node.v);
     val.title = "click to edit";
     val.addEventListener("click", () =>
       inlineEdit(val, String(node.v), (raw) => {
@@ -295,11 +320,9 @@ function renderNode(node, key, path, parent, q) {
     row.appendChild(val);
   }
 
-  // actions
   const actions = document.createElement("span");
   actions.className = "row-actions";
-  if (node.t === "compound" || node.t === "list" ||
-      node.t === "byteArray" || node.t === "intArray" || node.t === "longArray") {
+  if (isContainer) {
     const add = document.createElement("button");
     add.className = "mini-btn";
     add.textContent = "+";
@@ -324,7 +347,6 @@ function renderNode(node, key, path, parent, q) {
   }
   row.appendChild(actions);
 
-  // children
   if (isContainer && isOpen) {
     const kids = document.createElement("div");
     kids.className = "nbt-children";
@@ -437,6 +459,20 @@ function isPlayerFile(f) {
   return /(^|\/)playerdata\//.test(f.path) && f.root.t === "compound";
 }
 
+// server this file belongs to (first path segment) — for icon lookups
+function fileServer() {
+  return file ? file.path.split("/")[0] : "";
+}
+
+// the player (from the discovery tree) whose file collection contains path
+function playerCtx(path) {
+  if (!tree) return null;
+  for (const s of tree.servers)
+    for (const p of s.players || [])
+      if (p.files.some((f) => f.path === path)) return { server: s, player: p };
+  return null;
+}
+
 function tpath(root, path) {
   let n = root;
   for (const k of path.split(".")) {
@@ -444,6 +480,11 @@ function tpath(root, path) {
     n = n.v[k];
   }
   return n;
+}
+
+function dataVersion() {
+  const dv = tpath(file.root, "DataVersion");
+  return dv ? Number(dv.v) : 0;
 }
 
 function viewTabs() {
@@ -455,6 +496,28 @@ function viewTabs() {
     t.textContent = label;
     t.addEventListener("click", () => { viewMode = id; renderEditor(); });
     bar.appendChild(t);
+  }
+  return bar;
+}
+
+// chip strip of every file belonging to the same player (graves, mod data…)
+function playerFileTabs(ctx) {
+  const bar = document.createElement("div");
+  bar.className = "file-tabs";
+  const who = document.createElement("span");
+  who.className = "pv-label";
+  who.textContent = ctx.player.label;
+  bar.appendChild(who);
+  for (const f of ctx.player.files) {
+    const chip = document.createElement("button");
+    chip.className = "pv-chip" + (f.path === file.path ? " on" : "");
+    chip.textContent = f.label;
+    chip.title = f.path;
+    chip.addEventListener("click", () => {
+      if (f.path !== file.path)
+        openFile(f.path, `${ctx.server.name} / ${ctx.player.label} / ${f.label}`);
+    });
+    bar.appendChild(chip);
   }
   return bar;
 }
@@ -556,68 +619,272 @@ function pvGamemode(body, node) {
   body.appendChild(f);
 }
 
-// ------------------------------------------------- inventory slot grids
+// ------------------------------------------------------- potion effects
 
-// 1.20.5+ (DataVersion 3837) renamed items' Count byte -> count int.
-function countStyle(listNode) {
-  for (const it of (listNode && listNode.v) || []) {
+// 1.20.2 (DataVersion 3578) renamed ActiveEffects -> active_effects and
+// the per-effect keys from Id/Amplifier/Duration to id/amplifier/duration.
+function effectsSection() {
+  const r = file.root;
+  let list = tpath(r, "active_effects");
+  let modern = true;
+  if (!list) {
+    list = tpath(r, "ActiveEffects");
+    if (list) modern = false;
+    else modern = dataVersion() >= 3578;
+  }
+
+  const s = pvSection("potion effects");
+  const K = modern
+    ? { id: "id", amp: "amplifier", dur: "duration", amb: "ambient", part: "show_particles", icon: "show_icon" }
+    : { id: "Id", amp: "Amplifier", dur: "Duration", amb: "Ambient", part: "ShowParticles", icon: "ShowIcon" };
+
+  const col = document.createElement("div");
+  col.className = "effect-col";
+  s.body.appendChild(col);
+
+  (list ? list.v : []).forEach((eff, i) => {
+    if (eff.t !== "compound") return;
+    const row = document.createElement("div");
+    row.className = "effect-row";
+    pvField(row, "effect", tpath(eff, K.id), null, true);
+    pvField(row, "amplifier", tpath(eff, K.amp), "0 = level I");
+    pvField(row, "duration", tpath(eff, K.dur), "ticks · -1 = ∞");
+    pvBool(row, "ambient", tpath(eff, K.amb));
+    pvBool(row, "particles", tpath(eff, K.part));
+    const del = document.createElement("button");
+    del.className = "mini-btn del";
+    del.textContent = "×";
+    del.title = "remove effect";
+    del.addEventListener("click", () => {
+      list.v.splice(i, 1);
+      setDirty(true);
+      renderEditor();
+    });
+    row.appendChild(del);
+    col.appendChild(row);
+  });
+
+  const add = document.createElement("button");
+  add.className = "btn";
+  add.textContent = "add effect";
+  add.addEventListener("click", () => {
+    if (!list) {
+      const key = modern ? "active_effects" : "ActiveEffects";
+      r.v[key] = { t: "list", v: [] };
+      list = r.v[key];
+    }
+    list.v.push({ t: "compound", v: modern ? {
+      id: { t: "string", v: "minecraft:speed" },
+      amplifier: { t: "byte", v: 0 },
+      duration: { t: "int", v: 1200 },
+      ambient: { t: "byte", v: 0 },
+      show_particles: { t: "byte", v: 1 },
+      show_icon: { t: "byte", v: 1 },
+    } : {
+      Id: { t: "int", v: 1 },
+      Amplifier: { t: "byte", v: 0 },
+      Duration: { t: "int", v: 1200 },
+      Ambient: { t: "byte", v: 0 },
+      ShowParticles: { t: "byte", v: 1 },
+      ShowIcon: { t: "byte", v: 1 },
+    }});
+    setDirty(true);
+    renderEditor();
+  });
+  s.body.appendChild(add);
+  return s;
+}
+
+// ------------------------------------------------- inventory browser
+//
+// One pane with a file-browser crumb trail. The trail starts with a dropdown
+// of every root-level tag that looks like an inventory (Inventory, EnderItems,
+// mod lists of item compounds). Double-clicking an item that contains
+// sub-inventories (shulker component container, legacy BlockEntityTag.Items,
+// modded backpacks/graves — any nested list of item-shaped compounds)
+// descends into it.
+
+function isItemCompound(n) {
+  return n && n.t === "compound" && n.v.id && n.v.id.t === "string";
+}
+
+function isDirectItemList(n) {
+  return n && n.t === "list" && n.v.length > 0 &&
+    n.v.every((e) => e.t === "compound") && n.v.some(isItemCompound);
+}
+
+// components container style: list of {slot, item}
+function isWrappedItemList(n) {
+  return n && n.t === "list" && n.v.length > 0 &&
+    n.v.every((e) => e.t === "compound") &&
+    n.v.some((e) => isItemCompound(e.v.item));
+}
+
+const ACC = {
+  direct: {
+    slotOf: (e, i) => (e.v.Slot ? Number(e.v.Slot.v) : i),
+    itemOf: (e) => e,
+    make: (slot, id, count, ck) => ({ t: "compound", v: {
+      Slot: { t: "byte", v: slot },
+      id: { t: "string", v: id },
+      [ck]: { t: ck === "count" ? "int" : "byte", v: count },
+    }}),
+  },
+  wrapped: {
+    slotOf: (e, i) => (e.v.slot ? Number(e.v.slot.v) : i),
+    itemOf: (e) => e.v.item,
+    make: (slot, id, count) => ({ t: "compound", v: {
+      slot: { t: "int", v: slot },
+      item: { t: "compound", v: {
+        id: { t: "string", v: id },
+        count: { t: "int", v: count },
+      }},
+    }}),
+  },
+};
+
+// every nested item-list inside an item (its sub-inventories)
+function findItemLists(node) {
+  const out = [];
+  (function walk(n, path, depth) {
+    if (!n || depth > 6) return;
+    if (n.t === "list") {
+      if (isDirectItemList(n)) out.push({ path, node: n, style: "direct" });
+      else if (isWrappedItemList(n)) out.push({ path, node: n, style: "wrapped" });
+      return;
+    }
+    if (n.t === "compound")
+      for (const k of Object.keys(n.v))
+        walk(n.v[k], path ? path + "." + k : k, depth + 1);
+  })(node, "", 0);
+  return out;
+}
+
+function rootInventories() {
+  const out = [];
+  for (const [k, n] of Object.entries(file.root.v)) {
+    if (n.t !== "list") continue;
+    if (k === "Inventory" || k === "EnderItems" || isDirectItemList(n))
+      out.push({ key: k,
+                 label: k === "Inventory" ? "inventory"
+                      : k === "EnderItems" ? "ender chest" : k,
+                 node: n });
+  }
+  out.sort((a, b) =>
+    (a.key === "Inventory" ? 0 : a.key === "EnderItems" ? 1 : 2) -
+    (b.key === "Inventory" ? 0 : b.key === "EnderItems" ? 1 : 2) ||
+    a.key.localeCompare(b.key));
+  return out;
+}
+
+function currentPanes() {
+  if (invStack.length) return invStack[invStack.length - 1].panes;
+  const roots = rootInventories();
+  const root = roots.find((r) => r.key === invRootKey) || roots[0];
+  if (!root) return [];
+  invRootKey = root.key;
+  return [{ caption: null, node: root.node, style: "direct", rootKey: root.key }];
+}
+
+function countKeyFor(listNode, style) {
+  if (style === "wrapped") return "count";
+  for (const it of listNode.v) {
     if (it.t === "compound") {
       if ("count" in it.v) return "count";
       if ("Count" in it.v) return "Count";
     }
   }
-  const dv = tpath(file.root, "DataVersion");
-  return dv && Number(dv.v) >= 3837 ? "count" : "Count";
-}
-
-function itemId(it) {
-  const id = it.t === "compound" && tpath(it, "id");
-  return id ? String(id.v) : "?";
-}
-
-function itemCountNode(it) {
-  return tpath(it, "count") || tpath(it, "Count");
+  return dataVersion() >= 3837 ? "count" : "Count";
 }
 
 function shortId(id) {
   return id.startsWith("minecraft:") ? id.slice(10) : id;
 }
 
-function slotCell(gridId, slot, item, caption) {
+// icon fallback chain: server mod jars -> vanilla CDN item -> CDN block -> text
+function attachIcon(cell, id) {
+  const [ns, name] = id.includes(":") ? id.split(":", 2) : ["minecraft", id];
+  const urls = [`/api/icon?server=${encodeURIComponent(fileServer())}&id=${encodeURIComponent(id)}`];
+  if (ns === "minecraft")
+    urls.push(`${VANILLA_CDN}/item/${name}.png`, `${VANILLA_CDN}/block/${name}.png`);
+  const img = document.createElement("img");
+  let i = 0;
+  img.onerror = () => {
+    i++;
+    if (i < urls.length) img.src = urls[i];
+    else { img.remove(); cell.classList.remove("has-icon"); }
+  };
+  img.onload = () => cell.classList.add("has-icon");
+  img.src = urls[0];
+  img.alt = "";
+  img.draggable = false;
+  cell.appendChild(img);
+}
+
+function slotCell(paneIdx, slot, entry, caption, pane) {
+  const acc = ACC[pane.style];
+  const item = entry ? acc.itemOf(entry) : null;
   const cell = document.createElement("div");
-  const sel = selectedSlot && selectedSlot.grid === gridId && selectedSlot.slot === slot;
+  const sel = invSel && invSel.pane === paneIdx && invSel.slot === slot;
   cell.className = "slot" + (item ? "" : " empty") + (sel ? " sel" : "");
-  cell.title = item ? itemId(item) : (caption ? caption + " (empty)" : "empty — click to add");
+
   if (item) {
+    const id = String(item.v.id.v);
+    cell.title = id;
+    if (invQuery && fuzzyScore(invQuery, shortId(id) + " " + id) < 0)
+      cell.classList.add("dimmed");
     const n = document.createElement("div");
     n.className = "iname";
-    n.textContent = shortId(itemId(item));
+    n.textContent = shortId(id);
     cell.appendChild(n);
-    const cn = itemCountNode(item);
+    attachIcon(cell, id);
+    const cn = item.v.count || item.v.Count;
     if (cn && Number(cn.v) !== 1) {
       const c = document.createElement("div");
       c.className = "icount";
       c.textContent = cn.v;
       cell.appendChild(c);
     }
-  } else if (caption) {
-    const c = document.createElement("div");
-    c.className = "icap";
-    c.textContent = caption;
-    cell.appendChild(c);
+    const subs = findItemLists(item);
+    if (subs.length) {
+      cell.classList.add("has-sub");
+      cell.title = id + " — double-click to open contents";
+      const m = document.createElement("div");
+      m.className = "isub";
+      m.textContent = "▸";
+      cell.appendChild(m);
+      cell.addEventListener("dblclick", () => {
+        invStack.push({
+          label: shortId(id),
+          panes: subs.map((sub) => ({ caption: sub.path, node: sub.node, style: sub.style })),
+        });
+        invSel = null;
+        renderEditor();
+      });
+    }
+  } else {
+    cell.title = caption ? caption + " (empty)" : "empty — click to add";
+    if (caption) {
+      const c = document.createElement("div");
+      c.className = "icap";
+      c.textContent = caption;
+      cell.appendChild(c);
+    }
   }
+
   cell.addEventListener("click", () => {
-    selectedSlot = sel ? null : { grid: gridId, slot };
+    invSel = sel ? null : { pane: paneIdx, slot };
     renderEditor();
   });
   return cell;
 }
 
-function itemEditor(gridId, listNode) {
-  const slot = selectedSlot.slot;
-  const idx = listNode.v.findIndex(
-    (it) => it.t === "compound" && Number(tpath(it, "Slot")?.v) === slot);
-  const item = idx >= 0 ? listNode.v[idx] : null;
+function itemEditor(paneIdx, pane) {
+  const acc = ACC[pane.style];
+  const slot = invSel.slot;
+  const idx = pane.node.v.findIndex((e, i) => acc.slotOf(e, i) === slot);
+  const entry = idx >= 0 ? pane.node.v[idx] : null;
+  const item = entry ? acc.itemOf(entry) : null;
 
   const ed = document.createElement("div");
   ed.className = "item-edit";
@@ -631,13 +898,13 @@ function itemEditor(gridId, listNode) {
   idInput.type = "text";
   idInput.className = "pv-input wide";
   idInput.placeholder = "minecraft:diamond";
-  idInput.value = item ? itemId(item) : "";
+  idInput.value = item ? String(item.v.id.v) : "";
   ed.appendChild(idInput);
 
   const cInput = document.createElement("input");
   cInput.type = "text";
   cInput.className = "pv-input count";
-  cInput.value = item ? String(itemCountNode(item)?.v ?? 1) : "1";
+  cInput.value = item ? String((item.v.count || item.v.Count)?.v ?? 1) : "1";
   ed.appendChild(cInput);
 
   const apply = document.createElement("button");
@@ -650,19 +917,14 @@ function itemEditor(gridId, listNode) {
       if (!id.includes(":")) id = "minecraft:" + id;
       const count = Number(cInput.value);
       if (!Number.isInteger(count) || count < 1) throw new Error("count must be a positive integer");
-      const style = countStyle(listNode);
+      const ck = countKeyFor(pane.node, pane.style);
       if (item) {
-        const idNode = tpath(item, "id");
-        if (idNode) idNode.v = id; else item.v.id = { t: "string", v: id };
-        const cn = itemCountNode(item);
+        item.v.id.v = id;
+        const cn = item.v.count || item.v.Count;
         if (cn) cn.v = count;
-        else item.v[style] = { t: style === "count" ? "int" : "byte", v: count };
+        else item.v[ck] = { t: ck === "count" ? "int" : "byte", v: count };
       } else {
-        listNode.v.push({ t: "compound", v: {
-          Slot: { t: "byte", v: slot },
-          id: { t: "string", v: id },
-          [style]: { t: style === "count" ? "int" : "byte", v: count },
-        }});
+        pane.node.v.push(acc.make(slot, id, count, ck));
       }
       setDirty(true);
       setStatus(null);
@@ -671,13 +933,13 @@ function itemEditor(gridId, listNode) {
   });
   ed.appendChild(apply);
 
-  if (item) {
+  if (entry) {
     const del = document.createElement("button");
     del.className = "btn danger";
     del.textContent = "delete";
     del.addEventListener("click", () => {
-      listNode.v.splice(idx, 1);
-      selectedSlot = null;
+      pane.node.v.splice(idx, 1);
+      invSel = null;
       setDirty(true);
       renderEditor();
     });
@@ -686,9 +948,7 @@ function itemEditor(gridId, listNode) {
 
   const note = document.createElement("span");
   note.className = "pv-hint";
-  note.textContent = item
-    ? "enchantments & other item data are preserved — edit them in raw nbt"
-    : "";
+  note.textContent = item ? "enchantments & other item data are preserved — edit them in raw nbt" : "";
   ed.appendChild(note);
   return ed;
 }
@@ -697,47 +957,139 @@ const ARMOR_SLOTS = [
   [103, "head"], [102, "chest"], [101, "legs"], [100, "feet"], [-106, "offhand"],
 ];
 
-function invSection(title, gridId, listNode, layout) {
-  const s = pvSection(title);
-  if (!listNode || listNode.t !== "list") {
+function range(a, b) {
+  return Array.from({ length: b - a + 1 }, (_, i) => [a + i, null]);
+}
+
+function paneLayout(pane, bySlot) {
+  if (pane.rootKey === "Inventory")
+    return [
+      { slots: ARMOR_SLOTS },
+      { slots: range(9, 17), gap: true },
+      { slots: range(18, 26) },
+      { slots: range(27, 35) },
+      { slots: range(0, 8), gap: true },   // hotbar
+    ];
+  const maxSlot = Math.max(26, ...bySlot.keys());
+  const rows = [];
+  if (maxSlot <= 53)
+    for (let a = 0; a <= maxSlot; a += 9)
+      rows.push({ slots: range(a, Math.min(a + 8, maxSlot)) });
+  else
+    for (let a = 0; a <= 26; a += 9)
+      rows.push({ slots: range(a, a + 8) });
+  return rows;
+}
+
+function crumbBar() {
+  const bar = document.createElement("div");
+  bar.className = "crumb-bar";
+
+  const roots = rootInventories();
+  const sel = document.createElement("select");
+  sel.className = "pv-select";
+  for (const r of roots) {
+    const o = document.createElement("option");
+    o.value = r.key;
+    o.textContent = r.label;
+    sel.appendChild(o);
+  }
+  sel.value = invRootKey || (roots[0] && roots[0].key) || "";
+  sel.addEventListener("change", () => {
+    invRootKey = sel.value;
+    invStack = [];
+    invSel = null;
+    renderEditor();
+  });
+  bar.appendChild(sel);
+
+  invStack.forEach((level, i) => {
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.textContent = "/";
+    bar.appendChild(sep);
+    const seg = document.createElement("button");
+    seg.className = "crumb" + (i === invStack.length - 1 ? " here" : "");
+    seg.textContent = level.label;
+    seg.addEventListener("click", () => {
+      invStack.length = i + 1;
+      invSel = null;
+      renderEditor();
+    });
+    bar.appendChild(seg);
+  });
+
+  const spacer = document.createElement("span");
+  spacer.className = "crumb-spacer";
+  bar.appendChild(spacer);
+
+  const search = document.createElement("input");
+  search.type = "text";
+  search.className = "pv-input";
+  search.placeholder = "find item…";
+  search.value = invQuery;
+  search.addEventListener("input", () => {
+    invQuery = search.value.trim();
+    const editor = $("editor");
+    for (const cell of editor.querySelectorAll(".slot")) {
+      const id = cell.title.split(" ")[0];
+      cell.classList.toggle("dimmed",
+        !!invQuery && !cell.classList.contains("empty") &&
+        fuzzyScore(invQuery, shortId(id) + " " + id) < 0);
+    }
+  });
+  bar.appendChild(search);
+  return bar;
+}
+
+function inventorySection() {
+  const s = pvSection("items");
+  s.body.classList.add("inv-body");
+  const panes = currentPanes();
+  if (!panes.length) {
     const d = document.createElement("div");
     d.className = "pv-hint";
-    d.textContent = "no " + title + " tag in this file";
+    d.textContent = "no inventory tags in this file";
     s.body.appendChild(d);
     return s;
   }
-  const bySlot = new Map();
-  for (const it of listNode.v)
-    if (it.t === "compound") bySlot.set(Number(tpath(it, "Slot")?.v), it);
+  s.body.appendChild(crumbBar());
 
-  const col = document.createElement("div");
-  col.className = "inv-col";
-  for (const row of layout) {
-    const r = document.createElement("div");
-    r.className = "inv-row" + (row.gap ? " gap" : "");
-    for (const cell of row.slots)
-      r.appendChild(slotCell(gridId, cell[0], bySlot.get(cell[0]), cell[1]));
-    col.appendChild(r);
-  }
-  s.body.appendChild(col);
+  panes.forEach((pane, paneIdx) => {
+    if (pane.caption) {
+      const cap = document.createElement("div");
+      cap.className = "pane-cap";
+      cap.textContent = pane.caption;
+      s.body.appendChild(cap);
+    }
+    const bySlot = new Map();
+    pane.node.v.forEach((e, i) => bySlot.set(ACC[pane.style].slotOf(e, i), e));
 
-  // items parked on slots the layout doesn't draw (mod slots etc.)
-  const drawn = new Set(layout.flatMap((r) => r.slots.map((c) => c[0])));
-  const extras = [...bySlot.keys()].filter((n) => !drawn.has(n)).sort((a, b) => a - b);
-  if (extras.length) {
-    const r = document.createElement("div");
-    r.className = "inv-row gap";
-    for (const n of extras) r.appendChild(slotCell(gridId, n, bySlot.get(n), "slot " + n));
-    col.appendChild(r);
-  }
+    const col = document.createElement("div");
+    col.className = "inv-col";
+    const layout = paneLayout(pane, bySlot);
+    for (const row of layout) {
+      const r = document.createElement("div");
+      r.className = "inv-row" + (row.gap ? " gap" : "");
+      for (const cell of row.slots)
+        r.appendChild(slotCell(paneIdx, cell[0], bySlot.get(cell[0]), cell[1], pane));
+      col.appendChild(r);
+    }
+    const drawn = new Set(layout.flatMap((r) => r.slots.map((c) => c[0])));
+    const extras = [...bySlot.keys()].filter((n) => !drawn.has(n)).sort((a, b) => a - b);
+    if (extras.length) {
+      const r = document.createElement("div");
+      r.className = "inv-row gap";
+      for (const n of extras)
+        r.appendChild(slotCell(paneIdx, n, bySlot.get(n), "slot " + n, pane));
+      col.appendChild(r);
+    }
+    s.body.appendChild(col);
 
-  if (selectedSlot && selectedSlot.grid === gridId)
-    s.body.appendChild(itemEditor(gridId, listNode));
+    if (invSel && invSel.pane === paneIdx)
+      s.body.appendChild(itemEditor(paneIdx, pane));
+  });
   return s;
-}
-
-function range(a, b) {
-  return Array.from({ length: b - a + 1 }, (_, i) => [a + i, null]);
 }
 
 function renderPlayerView() {
@@ -790,22 +1142,115 @@ function renderPlayerView() {
   pvField(ab.body, "fly speed", tpath(r, "abilities.flySpeed"));
   v.appendChild(ab);
 
-  v.appendChild(invSection("inventory", "inv", tpath(r, "Inventory"), [
-    { slots: ARMOR_SLOTS },
-    { slots: range(9, 17), gap: true },
-    { slots: range(18, 26) },
-    { slots: range(27, 35) },
-    { slots: range(0, 8), gap: true },   // hotbar
-  ]));
-
-  v.appendChild(invSection("ender chest", "ender", tpath(r, "EnderItems"), [
-    { slots: range(0, 8) },
-    { slots: range(9, 17) },
-    { slots: range(18, 26) },
-  ]));
-
+  v.appendChild(effectsSection());
+  v.appendChild(inventorySection());
   return v;
 }
+
+// ------------------------------------------------------ tag path search
+//
+// Global fuzzy find over every scalar tag path in the open file; Enter on a
+// match turns the row into an inline value editor.
+
+function collectPaths() {
+  if (file._paths) return file._paths;
+  const out = [];
+  (function walk(n, label) {
+    if (out.length > 100000) return;
+    if (n.t === "compound") {
+      for (const k of Object.keys(n.v)) walk(n.v[k], label ? label + " / " + k : k);
+    } else if (n.t === "list") {
+      if (n.v.length <= 1000) n.v.forEach((c, i) => walk(c, label + " / " + i));
+    } else if (!CONTAINERS.has(n.t)) {
+      out.push({ label, node: n });
+    }
+  })(file.root, "");
+  file._paths = out;
+  return out;
+}
+
+function closeTagSearch() {
+  $("tagresults").hidden = true;
+  tagMatches = [];
+  tagSel = -1;
+}
+
+function renderTagResults() {
+  const box = $("tagresults");
+  box.textContent = "";
+  if (!tagMatches.length) { box.hidden = true; return; }
+  box.hidden = false;
+  tagMatches.forEach((m, i) => {
+    const row = document.createElement("div");
+    row.className = "tag-row" + (i === tagSel ? " sel" : "");
+    const pathEl = document.createElement("span");
+    pathEl.className = "tag-path";
+    pathEl.textContent = m.label;
+    row.appendChild(pathEl);
+    const val = document.createElement("span");
+    val.className = "tag-val";
+    val.textContent = String(m.node.v);
+    row.appendChild(val);
+    const type = document.createElement("span");
+    type.className = "nbt-type";
+    type.textContent = m.node.t;
+    row.appendChild(type);
+    row.addEventListener("click", () => { tagSel = i; editTagRow(); });
+    box.appendChild(row);
+  });
+}
+
+function editTagRow() {
+  const box = $("tagresults");
+  const row = box.children[tagSel];
+  const m = tagMatches[tagSel];
+  if (!row || !m) return;
+  const val = row.querySelector(".tag-val");
+  const input = document.createElement("input");
+  input.className = "nbt-edit";
+  input.value = String(m.node.v);
+  val.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (apply) => {
+    if (done) return;
+    done = true;
+    if (apply) {
+      try {
+        m.node.v = validateScalar(m.node.t, input.value);
+        setDirty(true);
+        setStatus("set " + m.label + " = " + m.node.v, "ok");
+        closeTagSearch();
+        $("tagsearch").value = "";
+        renderEditor();
+        return;
+      } catch (e) { setStatus(String(e.message || e), "err"); }
+    }
+    renderTagResults();
+    $("tagsearch").focus();
+  };
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.stopPropagation(); finish(true); }
+    if (ev.key === "Escape") { ev.stopPropagation(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(false));
+}
+
+function onTagSearchInput() {
+  if (!file) return;
+  const q = $("tagsearch").value.trim();
+  if (!q) { closeTagSearch(); return; }
+  tagMatches = collectPaths()
+    .map((e) => ({ ...e, score: fuzzyScore(q, e.label) }))
+    .filter((e) => e.score >= 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 30);
+  tagSel = tagMatches.length ? 0 : -1;
+  renderTagResults();
+}
+
+// --------------------------------------------------------------- editor
 
 function renderEditor() {
   const el = $("editor");
@@ -814,10 +1259,12 @@ function renderEditor() {
     const d = document.createElement("div");
     d.id = "empty";
     d.className = "dim";
-    d.textContent = "Pick a world, player or data file on the left.";
+    d.textContent = "Pick a player, world or data file on the left.";
     el.appendChild(d);
     return;
   }
+  const ctx = playerCtx(file.path);
+  if (ctx && ctx.player.files.length > 1) el.appendChild(playerFileTabs(ctx));
   const player = isPlayerFile(file);
   $("filter").hidden = player && viewMode === "player";
   if (player) el.appendChild(viewTabs());
@@ -846,7 +1293,13 @@ async function openFile(path, label, row) {
     expanded.clear();
     expanded.add("$");
     viewMode = isPlayerFile(file) ? "player" : "raw";
-    selectedSlot = null;
+    invRootKey = null;
+    invStack = [];
+    invSel = null;
+    invQuery = "";
+    closeTagSearch();
+    $("tagsearch").value = "";
+    $("tagsearch").hidden = false;
     setDirty(false);
     setStatus(null);
     $("filelabel").textContent = label || path;
@@ -855,6 +1308,9 @@ async function openFile(path, label, row) {
     $("filter").hidden = false;
     $("reload").disabled = false;
     if (activeRow) activeRow.classList.remove("active");
+    if (!row) {
+      row = $("tree").querySelector(`[data-path="${CSS.escape(path)}"]`) || undefined;
+    }
     if (row) { row.classList.add("active"); activeRow = row; }
     renderEditor();
   } catch (e) {
@@ -892,6 +1348,18 @@ $("search").addEventListener("input", renderSidebar);
 $("filter").addEventListener("input", renderEditor);
 $("save").addEventListener("click", saveFile);
 $("reload").addEventListener("click", reloadFile);
+
+$("tagsearch").addEventListener("input", onTagSearchInput);
+$("tagsearch").addEventListener("keydown", (ev) => {
+  if (ev.key === "ArrowDown") { ev.preventDefault(); if (tagSel < tagMatches.length - 1) { tagSel++; renderTagResults(); } }
+  else if (ev.key === "ArrowUp") { ev.preventDefault(); if (tagSel > 0) { tagSel--; renderTagResults(); } }
+  else if (ev.key === "Enter" && tagSel >= 0) { ev.preventDefault(); editTagRow(); }
+  else if (ev.key === "Escape") { closeTagSearch(); $("tagsearch").blur(); }
+});
+document.addEventListener("click", (ev) => {
+  if (!ev.target.closest("#tagresults") && ev.target !== $("tagsearch")) closeTagSearch();
+});
+
 document.addEventListener("keydown", (ev) => {
   if ((ev.ctrlKey || ev.metaKey) && ev.key === "s") {
     ev.preventDefault();

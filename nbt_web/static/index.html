@@ -18,10 +18,12 @@
       <span id="filelabel" class="dim">no file open</span>
       <span id="dirty" class="dirty" hidden>modified</span>
       <span class="spacer"></span>
+      <input id="tagsearch" type="text" placeholder="find tag path… (enter = edit)" autocomplete="off" spellcheck="false" hidden>
       <input id="filter" type="text" placeholder="filter keys…" autocomplete="off" spellcheck="false" hidden>
       <button id="save" class="btn primary" disabled title="Save (Ctrl+S)">save</button>
       <button id="reload" class="btn" disabled title="Reload from disk">reload</button>
     </div>
+    <div id="tagresults" hidden></div>
     <div id="status" hidden></div>
     <div id="editor">
       <div id="empty" class="dim">Pick a world, player or data file on the left.</div>
