@@ -600,6 +600,12 @@ def list_effects(server: str) -> dict:
     return {"effects": sorted(_icon_index(_server_dir(server))["effect"].keys())}
 
 
+def list_items(server: str) -> dict:
+    """Item/block ids known to this server's mods (from item/block textures)."""
+    idx = _icon_index(_server_dir(server))
+    return {"items": sorted(set(idx["item"]) | set(idx["block"]))}
+
+
 # ------------------------------------------------------------------ server
 
 MIME = {".html": "text/html", ".js": "text/javascript", ".css": "text/css",
@@ -687,6 +693,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/effects":
                 q = parse_qs(url.query)
                 return self._json(200, list_effects(q.get("server", [""])[0]))
+            if url.path == "/api/items":
+                q = parse_qs(url.query)
+                return self._json(200, list_items(q.get("server", [""])[0]))
             if url.path == "/api/backups":
                 q = parse_qs(url.query)
                 return self._json(200, list_backups(q.get("path", [""])[0]))

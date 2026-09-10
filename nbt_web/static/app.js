@@ -22,6 +22,8 @@ let tagSel = -1;
 
 let effectIdsLoaded = null;        // server whose effect datalist is loaded
 let effectIds = [];                // known effect ids for the current server
+let itemIdsLoaded = null;          // server whose item id list is loaded
+let itemIds = [];                  // known item/block ids for the current server
 
 // Potion duration is a signed 32-bit int of ticks; the game can't hold more.
 const DURATION_MAX = 2147483647;
@@ -46,6 +48,17 @@ const VANILLA_EFFECTS = [
   "slow_falling", "conduit_power", "dolphins_grace", "bad_omen",
   "hero_of_the_village", "darkness", "trial_omen", "raid_omen", "wind_charged",
   "weaving", "oozing", "infested",
+].map((n) => "minecraft:" + n);
+
+const VANILLA_ENCHANTS = [
+  "protection", "fire_protection", "feather_falling", "blast_protection",
+  "projectile_protection", "respiration", "aqua_affinity", "thorns",
+  "depth_strider", "frost_walker", "binding_curse", "soul_speed", "swift_sneak",
+  "sharpness", "smite", "bane_of_arthropods", "knockback", "fire_aspect",
+  "looting", "sweeping_edge", "efficiency", "silk_touch", "unbreaking",
+  "fortune", "power", "punch", "flame", "infinity", "luck_of_the_sea", "lure",
+  "loyalty", "impaling", "riptide", "channeling", "multishot", "quick_charge",
+  "piercing", "density", "breach", "wind_burst", "mending", "vanishing_curse",
 ].map((n) => "minecraft:" + n);
 
 function setStatus(msg, cls) {
@@ -903,14 +916,13 @@ function openItemModal(pane, slot, rerender) {
 
   const head = document.createElement("div");
   head.className = "im-head";
-  let preview = iconBox(item ? String(item.v.id.v) : "minecraft:stone", "item", "im-icon");
-  head.appendChild(preview);
-  const idInput = document.createElement("input");
-  idInput.type = "text";
-  idInput.className = "pv-input wide";
-  idInput.placeholder = "minecraft:diamond";
-  idInput.value = item ? String(item.v.id.v) : "";
-  head.appendChild(idInput);
+  const combo = comboBox({
+    options: itemIds,
+    placeholder: "minecraft:diamond",
+    initial: item ? String(item.v.id.v) : "",
+    iconKind: "item",
+  });
+  head.appendChild(combo.el);
   b.appendChild(head);
 
   // count: slider capped at the stack size, number box free to exceed it
@@ -924,18 +936,12 @@ function openItemModal(pane, slot, rerender) {
   cInput.type = "text";
   cInput.className = "pv-input count";
   cInput.value = item ? String((item.v.count || item.v.Count || {}).v || 1) : "1";
-  const slider = miniSlider(1, maxStackFor(idInput.value || "x"), Number(cInput.value) || 1, 1,
+  const slider = miniSlider(1, maxStackFor(combo.value() || "x"), Number(cInput.value) || 1, 1,
     (v) => { cInput.value = v; });
   cRow.appendChild(slider.el);
   cRow.appendChild(cInput);
   b.appendChild(cRow);
   cInput.addEventListener("input", () => slider.set(Number(cInput.value) || 1));
-  idInput.addEventListener("change", () => {
-    // refresh preview + stack cap for the new id
-    const nb = iconBox(idInput.value.trim() || "minecraft:stone", "item", "im-icon");
-    preview.replaceWith(nb);
-    preview = nb;
-  });
 
   // enchantments
   const enchWrap = document.createElement("div");
@@ -952,12 +958,13 @@ function openItemModal(pane, slot, rerender) {
     enchants.forEach((e, i) => {
       const r = document.createElement("div");
       r.className = "ench-row";
-      const id = document.createElement("input");
-      id.type = "text";
-      id.className = "pv-input wide";
-      id.value = e.id;
-      id.addEventListener("input", () => { e.id = id.value; });
-      r.appendChild(id);
+      const idc = comboBox({
+        options: VANILLA_ENCHANTS,
+        placeholder: "minecraft:sharpness",
+        initial: e.id,
+        onChange: (v) => { e.id = v; },
+      });
+      r.appendChild(idc.el);
       const lvl = document.createElement("input");
       lvl.type = "text";
       lvl.className = "pv-input count";
@@ -1046,7 +1053,7 @@ function openItemModal(pane, slot, rerender) {
   apply.textContent = item ? "apply" : "add";
   apply.addEventListener("click", () => {
     try {
-      let id = idInput.value.trim();
+      let id = combo.value().trim();
       if (!id) throw new Error("item id required");
       if (!id.includes(":")) id = "minecraft:" + id;
       const count = Number(cInput.value);
@@ -1080,7 +1087,7 @@ function openItemModal(pane, slot, rerender) {
   });
   foot.appendChild(apply);
   b.appendChild(foot);
-  idInput.focus();
+  combo.input.focus();
 }
 
 // ---- slot grid
@@ -1497,28 +1504,60 @@ async function loadEffectIds() {
   effectIdsLoaded = server;
 }
 
-// Styled autocomplete: a text input sitting over a themed dropdown (a native
-// <datalist> can't be styled). Filters options as you type, highlights the
-// best match first, arrow keys move the highlight, Enter/click commits it.
-// Returns { el, input, value() }. onEnter (optional) fires when Enter is
-// pressed with the menu already closed (e.g. to submit the surrounding form).
-function comboBox(options, placeholder, onEnter) {
+async function loadItemIds() {
+  const server = fileServer();
+  if (!server || itemIdsLoaded === server) return;
+  try { itemIds = (await api("/api/items?server=" + encodeURIComponent(server))).items; }
+  catch { itemIds = []; }   // mods dir may not exist — free-text still works
+  itemIdsLoaded = server;
+}
+
+// Styled autocomplete for any game-ID field (a native <datalist> can't be
+// themed). Filters options as you type, highlights the best match first, arrow
+// keys move the highlight, Enter/click commits it. With `iconKind` set it shows
+// a live icon of the current first match to the left of the box.
+// opts: { options[], placeholder, initial, iconKind ("item"|"effect"|null),
+//         onEnter (menu-closed Enter → submit form), onChange (value changed) }
+// Returns { el, input, value() }.
+function comboBox({ options = [], placeholder = "", initial = "",
+                    iconKind = null, onEnter = null, onChange = null } = {}) {
   const wrap = document.createElement("div");
   wrap.className = "combo";
+  const field = document.createElement("div");
+  field.className = "combo-field";
+  let iconHolder = null;
+  if (iconKind) {
+    iconHolder = document.createElement("span");
+    iconHolder.className = "combo-icon";
+    field.appendChild(iconHolder);
+  }
   const input = document.createElement("input");
   input.type = "text";
   input.className = "pv-input wide";
   input.placeholder = placeholder || "";
   input.autocomplete = "off";
+  if (initial) input.value = initial;
+  field.appendChild(input);
+  wrap.appendChild(field);
   const menu = document.createElement("div");
   menu.className = "combo-menu";
   menu.hidden = true;
-  wrap.appendChild(input);
   wrap.appendChild(menu);
 
   let matches = [];
   let sel = -1;
+  let lastIcon = null;
 
+  const previewId = () => (sel >= 0 && matches[sel]) ? matches[sel] : input.value.trim();
+  const updateIcon = () => {
+    if (!iconHolder) return;
+    const raw = previewId();
+    if (raw === lastIcon) return;   // avoid re-fetching the same icon per keystroke
+    lastIcon = raw;
+    iconHolder.textContent = "";
+    if (raw) iconHolder.appendChild(
+      iconBox(raw.includes(":") ? raw : "minecraft:" + raw, iconKind, "combo-ic"));
+  };
   const rebuild = () => {
     const q = input.value.trim().toLowerCase();
     let pool = q ? options.filter((o) => o.toLowerCase().includes(q)) : options.slice();
@@ -1530,6 +1569,7 @@ function comboBox(options, placeholder, onEnter) {
   };
   const paint = () => {
     menu.textContent = "";
+    updateIcon();
     if (!matches.length) { menu.hidden = true; return; }
     menu.hidden = false;
     matches.forEach((m, i) => {
@@ -1542,9 +1582,13 @@ function comboBox(options, placeholder, onEnter) {
     const cur = menu.children[sel];
     if (cur) cur.scrollIntoView({ block: "nearest" });
   };
-  const commit = (val) => { input.value = val; matches = []; sel = -1; menu.hidden = true; };
+  const commit = (val) => {
+    input.value = val; matches = []; sel = -1; menu.hidden = true;
+    updateIcon();
+    if (onChange) onChange(val);
+  };
 
-  input.addEventListener("input", rebuild);
+  input.addEventListener("input", () => { rebuild(); if (onChange) onChange(input.value); });
   input.addEventListener("focus", rebuild);
   input.addEventListener("blur", () => setTimeout(() => { menu.hidden = true; }, 120));
   input.addEventListener("keydown", (ev) => {
@@ -1560,6 +1604,7 @@ function comboBox(options, placeholder, onEnter) {
     }
   });
 
+  updateIcon();
   return { el: wrap, input, value: () => input.value };
 }
 
@@ -1615,8 +1660,13 @@ function openEffectModal() {
   idLabel.className = "field-label";
   idLabel.textContent = "effect";
   idField.appendChild(idLabel);
-  const combo = comboBox(modern ? effectIds : [], modern ? "minecraft:speed" : "numeric id", submit);
-  if (!modern) combo.input.value = "1";
+  const combo = comboBox({
+    options: modern ? effectIds : [],
+    placeholder: modern ? "minecraft:speed" : "numeric id",
+    initial: modern ? "" : "1",
+    iconKind: modern ? "effect" : null,
+    onEnter: submit,
+  });
   idField.appendChild(combo.el);
   b.appendChild(idField);
 
@@ -2117,6 +2167,7 @@ async function openFile(path, label, row) {
     if (!row) row = $("tree").querySelector(`[data-path="${CSS.escape(path)}"]`) || undefined;
     if (row) { row.classList.add("active"); activeRow = row; }
     loadEffectIds();
+    loadItemIds();
     renderEditor();
   } catch (e) {
     setStatus("open failed: " + e.message, "err");

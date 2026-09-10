@@ -504,7 +504,12 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 .field-row .field { flex: 1; }
 
 /* styled autocomplete (replaces the un-themeable native datalist popup) */
-.combo { position: relative; }
+.combo { position: relative; flex: 1; min-width: 0; }
+.combo-field { display: flex; align-items: center; gap: 8px; }
+.combo-field .pv-input { flex: 1; min-width: 0; }
+.combo-icon { flex: 0 0 auto; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; }
+.combo-ic { width: 34px; height: 34px; display: block; }
+.combo-ic img { width: 30px; height: 30px; image-rendering: pixelated; display: block; }
 .combo-menu {
   position: absolute;
   top: calc(100% + 4px);
