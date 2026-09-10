@@ -2244,7 +2244,7 @@ function playerFileTabs(ctx) {
   who.className = "pv-label";
   who.textContent = ctx.player.label;
   bar.appendChild(who);
-  for (const f of ctx.player.files) {
+  for (const f of ctx.player.files.filter(f => !f.label.includes("(old)"))) {
     const chip = document.createElement("button");
     chip.className = "pv-chip" + (f.path === file.path ? " on" : "");
     chip.textContent = f.label;
