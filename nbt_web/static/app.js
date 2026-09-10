@@ -9,18 +9,18 @@ let file = null;          // /api/file result (model, mutated in place)
 let dirty = false;
 let viewMode = "raw";     // "player" | "raw" (player only for playerdata files)
 let activeRow = null;     // sidebar DOM row of the open file
+let currentServer = null; // server object when the server overview is shown
 const expanded = new Set(["$"]);   // editor node paths expanded
 const sbOpen = new Set();          // sidebar group keys expanded
 
-// inventory browser (player view) — reset per file
-let invRootKey = null;    // which root inventory the crumb dropdown shows
-let invStack = [];        // [{label, panes: [{caption, node, style}]}]
-let invSel = null;        // {pane: idx, slot: n} — open item editor
-let invQuery = "";        // slot fuzzy filter
+// player-view inventory browser state (modals hold their own)
+const invState = { rootKey: null, stack: [], query: "" };
 
 // global tag-path search
 let tagMatches = [];
 let tagSel = -1;
+
+let effectIdsLoaded = null;        // server whose effect datalist is loaded
 
 const CONTAINERS = new Set(["compound", "list", "byteArray", "intArray", "longArray"]);
 const NUMS = { byte: [-128n, 127n], short: [-32768n, 32767n], int: [-2147483648n, 2147483647n],
@@ -28,8 +28,21 @@ const NUMS = { byte: [-128n, 127n], short: [-32768n, 32767n], int: [-2147483648n
 const TYPES = ["byte", "short", "int", "long", "float", "double", "string",
                "compound", "list", "byteArray", "intArray", "longArray"];
 
+const CLIP_KEY = "nbtweb-item-clip";
+
 // Vanilla textures aren't in server jars; this CDN serves them per version.
 const VANILLA_CDN = "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.21.4/assets/minecraft/textures";
+
+const VANILLA_EFFECTS = [
+  "speed", "slowness", "haste", "mining_fatigue", "strength", "instant_health",
+  "instant_damage", "jump_boost", "nausea", "regeneration", "resistance",
+  "fire_resistance", "water_breathing", "invisibility", "blindness",
+  "night_vision", "hunger", "weakness", "poison", "wither", "health_boost",
+  "absorption", "saturation", "glowing", "levitation", "luck", "unluck",
+  "slow_falling", "conduit_power", "dolphins_grace", "bad_omen",
+  "hero_of_the_village", "darkness", "trial_omen", "raid_omen", "wind_charged",
+  "weaving", "oozing", "infested",
+].map((n) => "minecraft:" + n);
 
 function setStatus(msg, cls) {
   const el = $("status");
@@ -48,7 +61,6 @@ function setDirty(d) {
 
 // ---------------------------------------------------------------- fuzzy
 
-// Subsequence match; bonus for matches at word starts and adjacency.
 function fuzzyScore(query, text) {
   const q = query.toLowerCase(), t = text.toLowerCase();
   let qi = 0, score = 0, last = -2;
@@ -78,22 +90,18 @@ function flatEntries() {
   return out;
 }
 
-function fileRow(label, path, prefix) {
+function fileRow(label, path) {
   const row = document.createElement("div");
   row.className = "node-row";
   row.dataset.path = path;
-  if (prefix) {
-    const pre = document.createElement("span");
-    pre.className = "prefix";
-    pre.textContent = prefix;
-    row.appendChild(pre);
-  }
   row.appendChild(document.createTextNode(label));
   row.addEventListener("click", () => openFile(path, label, row));
   if (file && file.path === path) { row.classList.add("active"); activeRow = row; }
   return row;
 }
 
+// onOpen: clicking the row opens something in the editor (server overview,
+// player's playerdata) and always expands; the caret alone toggles collapse.
 function groupRow(label, key, count, childrenEl, onOpen) {
   const row = document.createElement("div");
   row.className = "node-row";
@@ -112,14 +120,16 @@ function groupRow(label, key, count, childrenEl, onOpen) {
     caret.textContent = open ? "▾" : "▸";
     childrenEl.hidden = !open;
   };
+  caret.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    sbOpen.has(key) ? sbOpen.delete(key) : sbOpen.add(key);
+    sync();
+  });
   row.addEventListener("click", () => {
     if (onOpen) {
-      // player dirs: click always opens playerdata and ensures expansion;
-      // a second click while already open+expanded collapses.
-      if (sbOpen.has(key) && file && file.path === onOpen.path) sbOpen.delete(key);
-      else sbOpen.add(key);
+      sbOpen.add(key);
       sync();
-      openFile(onOpen.path, onOpen.label);
+      onOpen();
       return;
     }
     sbOpen.has(key) ? sbOpen.delete(key) : sbOpen.add(key);
@@ -156,16 +166,14 @@ function renderSidebar() {
     const kids = document.createElement("div");
     kids.className = "tree-indent";
 
-    // players first, as directories of all their files on this server
     for (const p of s.players || []) {
       const pkids = document.createElement("div");
       pkids.className = "tree-indent";
-      for (const f of p.files)
-        pkids.appendChild(fileRow(f.label, f.path));
+      for (const f of p.files) pkids.appendChild(fileRow(f.label, f.path));
       const pd = p.files[0]; // playerdata is always first
       kids.appendChild(groupRow(p.label, `${s.name}/p/${p.uuid}`,
         p.files.length > 1 ? p.files.length : null, pkids,
-        { path: pd.path, label: `${s.name} / ${p.label} / ${pd.label}` }));
+        () => openFile(pd.path, `${s.name} / ${p.label} / ${pd.label}`)));
       kids.appendChild(pkids);
     }
 
@@ -185,12 +193,13 @@ function renderSidebar() {
     }
     const nP = (s.players || []).length;
     el.appendChild(groupRow(s.name, s.name,
-      (nP ? nP + " players · " : "") + s.worlds.length + " worlds", kids));
+      (nP ? nP + " players · " : "") + s.worlds.length + " worlds", kids,
+      () => openServerView(s)));
     el.appendChild(kids);
   }
 }
 
-// --------------------------------------------------------------- editor
+// ------------------------------------------------------------ raw tree
 
 function typeLabel(node) {
   if (node.t === "list") {
@@ -201,7 +210,6 @@ function typeLabel(node) {
 }
 
 function validateScalar(t, raw) {
-  // returns parsed value or throws
   if (t === "string") return raw;
   if (t === "float" || t === "double") {
     const f = Number(raw);
@@ -223,7 +231,6 @@ function defaultValue(t) {
   return 0;
 }
 
-// Inline edit an element `span` whose committed value goes through `commit(raw)`.
 function inlineEdit(span, initial, commit) {
   const input = document.createElement("input");
   input.className = "nbt-edit";
@@ -261,7 +268,6 @@ function matchesFilter(node, key, q) {
   return false;
 }
 
-// parent: {remove(), rename(newKey)} accessors, null for root
 function renderNode(node, key, path, parent, q) {
   const wrap = document.createElement("div");
   wrap.className = "nbt-node";
@@ -320,6 +326,18 @@ function renderNode(node, key, path, parent, q) {
     row.appendChild(val);
   }
 
+  // anything that holds actual items opens in the inventory editor
+  const invStyle = isDirectItemList(node) ? "direct"
+                 : isWrappedItemList(node) ? "wrapped" : null;
+  if (invStyle) {
+    const openInv = document.createElement("button");
+    openInv.className = "mini-btn inv-open";
+    openInv.textContent = "open as inventory";
+    openInv.addEventListener("click", () =>
+      openInventoryModal(String(key), node, invStyle));
+    row.appendChild(openInv);
+  }
+
   const actions = document.createElement("span");
   actions.className = "row-actions";
   if (isContainer) {
@@ -371,7 +389,6 @@ function renderNode(node, key, path, parent, q) {
         }, q));
       });
     } else {
-      // numeric arrays: render scalars of the element type
       const et = node.t === "byteArray" ? "byte" : node.t === "intArray" ? "int" : "long";
       node.v.forEach((c, i) => {
         kids.appendChild(renderNode({ t: et, get v() { return node.v[i]; },
@@ -447,24 +464,18 @@ function showAddForm(wrap, node) {
   (nameInput || typeSel || ok).focus();
 }
 
-// ---------------------------------------------------------- player view
-//
-// Abstracted editor for playerdata files. Every widget writes straight into
-// the same tagged-JSON model the raw tree renders, so the two views and the
-// save path never diverge. Fields whose tag is missing are simply omitted.
-
-const GAMEMODES = ["survival", "creative", "adventure", "spectator"];
+// --------------------------------------------------------- shared bits
 
 function isPlayerFile(f) {
   return /(^|\/)playerdata\//.test(f.path) && f.root.t === "compound";
 }
 
-// server this file belongs to (first path segment) — for icon lookups
 function fileServer() {
-  return file ? file.path.split("/")[0] : "";
+  if (file) return file.path.split("/")[0];
+  if (currentServer) return currentServer.name;
+  return "";
 }
 
-// the player (from the discovery tree) whose file collection contains path
 function playerCtx(path) {
   if (!tree) return null;
   for (const s of tree.servers)
@@ -487,6 +498,808 @@ function dataVersion() {
   return dv ? Number(dv.v) : 0;
 }
 
+function shortId(id) {
+  return id.startsWith("minecraft:") ? id.slice(10) : id;
+}
+
+// icon fallback: server mod jars -> vanilla CDN -> nothing (text stays)
+function attachIcon(box, id, kind) {
+  const [ns, name] = id.includes(":") ? id.split(":", 2) : ["minecraft", id];
+  const urls = [`/api/icon?server=${encodeURIComponent(fileServer())}&id=${encodeURIComponent(id)}` +
+                (kind === "effect" ? "&kind=effect" : "")];
+  if (ns === "minecraft") {
+    if (kind === "effect") urls.push(`${VANILLA_CDN}/mob_effect/${name}.png`);
+    else urls.push(`${VANILLA_CDN}/item/${name}.png`, `${VANILLA_CDN}/block/${name}.png`);
+  }
+  const img = document.createElement("img");
+  let i = 0;
+  img.onerror = () => {
+    i++;
+    if (i < urls.length) img.src = urls[i];
+    else { img.remove(); box.classList.remove("has-icon"); }
+  };
+  img.onload = () => box.classList.add("has-icon");
+  img.src = urls[0];
+  img.alt = "";
+  img.draggable = false;
+  box.appendChild(img);
+}
+
+function iconBox(id, kind, cls) {
+  const box = document.createElement("span");
+  box.className = cls || "mini-icon";
+  attachIcon(box, id, kind);
+  return box;
+}
+
+// ------------------------------------------------------- form building
+
+function card(title, full) {
+  const c = document.createElement("div");
+  c.className = "card" + (full ? " full" : "");
+  if (title) {
+    const h = document.createElement("div");
+    h.className = "card-title";
+    h.textContent = title;
+    c.appendChild(h);
+  }
+  const body = document.createElement("div");
+  body.className = "card-body";
+  c.appendChild(body);
+  c.body = body;
+  return c;
+}
+
+function frow(body, label) {
+  const r = document.createElement("div");
+  r.className = "frow";
+  const l = document.createElement("span");
+  l.className = "flabel";
+  l.textContent = label;
+  r.appendChild(l);
+  const ctls = document.createElement("div");
+  ctls.className = "fctls";
+  r.appendChild(ctls);
+  body.appendChild(r);
+  return ctls;
+}
+
+function boundInput(node, cls) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "pv-input" + (cls ? " " + cls : "");
+  input.value = node.v;
+  const commit = () => {
+    if (String(node.v) === input.value.trim()) return;
+    try {
+      node.v = validateScalar(node.t, input.value);
+      input.value = node.v;
+      input.classList.remove("bad");
+      setDirty(true);
+      setStatus(null);
+    } catch (e) {
+      input.classList.add("bad");
+      setStatus(String(e.message || e), "err");
+    }
+  };
+  input.addEventListener("change", commit);
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") commit(); });
+  return input;
+}
+
+function addNum(ctls, node, cls) {
+  if (node && !CONTAINERS.has(node.t)) ctls.appendChild(boundInput(node, cls));
+}
+
+// labelled row that is simply omitted when the tag is absent
+function numRow(body, label, node, cls) {
+  if (!node || CONTAINERS.has(node.t)) return null;
+  const ctls = frow(body, label);
+  ctls.appendChild(boundInput(node, cls));
+  return ctls;
+}
+
+function switchRow(body, label, node) {
+  if (!node) return;
+  const ctls = frow(body, label);
+  const sw = document.createElement("div");
+  sw.className = "sw" + (node.v ? " on" : "");
+  const knob = document.createElement("div");
+  knob.className = "knob";
+  sw.appendChild(knob);
+  sw.addEventListener("click", () => {
+    node.v = node.v ? 0 : 1;
+    sw.classList.toggle("on", !!node.v);
+    setDirty(true);
+  });
+  ctls.appendChild(sw);
+}
+
+// house mini slider: inset track, accent-dark fill, round accent handle
+function miniSlider(min, max, val, step, onInput) {
+  const el = document.createElement("div");
+  el.className = "msl";
+  const track = document.createElement("div");
+  track.className = "msl-track";
+  const fill = document.createElement("div");
+  fill.className = "msl-fill";
+  const handle = document.createElement("div");
+  handle.className = "msl-handle";
+  track.appendChild(fill);
+  track.appendChild(handle);
+  el.appendChild(track);
+  let cur = val;
+  const set = (v) => {
+    cur = Math.max(min, Math.min(max, v));
+    const f = max > min ? (cur - min) / (max - min) : 0;
+    fill.style.width = (f * 100) + "%";
+    handle.style.left = `calc(${f * 100}% - 6px)`;
+  };
+  const fromEvent = (ev) => {
+    const rect = track.getBoundingClientRect();
+    let f = (ev.clientX - rect.left) / rect.width;
+    f = Math.max(0, Math.min(1, f));
+    let v = min + f * (max - min);
+    if (step) v = Math.round(v / step) * step;
+    set(v);
+    onInput(cur);
+  };
+  el.addEventListener("pointerdown", (ev) => {
+    el.setPointerCapture(ev.pointerId);
+    fromEvent(ev);
+    const move = (e2) => fromEvent(e2);
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  });
+  set(val);
+  return { el, set, get: () => cur };
+}
+
+// ---------------------------------------------------------------- modals
+
+const MODALS = [];
+
+function modalShell(title, wide) {
+  const ov = document.createElement("div");
+  ov.className = "modal-overlay";
+  const box = document.createElement("div");
+  box.className = "modal" + (wide ? " wide" : "");
+  ov.appendChild(box);
+  const head = document.createElement("div");
+  head.className = "modal-head";
+  const t = document.createElement("span");
+  t.className = "modal-title";
+  t.textContent = title;
+  head.appendChild(t);
+  const x = document.createElement("button");
+  x.className = "mini-btn del";
+  x.textContent = "×";
+  head.appendChild(x);
+  box.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "modal-body";
+  box.appendChild(body);
+  const shell = { ov, body, close: () => {
+    const i = MODALS.indexOf(shell);
+    if (i >= 0) MODALS.splice(i, 1);
+    ov.remove();
+  }};
+  x.addEventListener("click", shell.close);
+  ov.addEventListener("mousedown", (ev) => { if (ev.target === ov) shell.close(); });
+  document.body.appendChild(ov);
+  MODALS.push(shell);
+  return shell;
+}
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && MODALS.length) {
+    ev.stopPropagation();
+    MODALS[MODALS.length - 1].close();
+  }
+});
+
+// ---------------------------------------------- inventory (reusable)
+//
+// The browser renders any list of item-shaped compounds: the player view
+// hosts one over the whole file, the raw tree can open any recognized
+// container list in a modal, and both drill into nested sub-inventories
+// (shulker component containers, backpack Items lists, …) with a crumb
+// trail. State {rootKey, stack, query} is per-host.
+
+function isItemCompound(n) {
+  return n && n.t === "compound" && n.v.id && n.v.id.t === "string" &&
+    (n.v.Slot || n.v.count || n.v.Count);
+}
+
+function isDirectItemList(n) {
+  return n && n.t === "list" && n.v.length > 0 &&
+    n.v.every((e) => e.t === "compound") && n.v.some(isItemCompound);
+}
+
+function isWrappedItemList(n) {
+  return n && n.t === "list" && n.v.length > 0 &&
+    n.v.every((e) => e.t === "compound") &&
+    n.v.some((e) => isItemCompound(e.v.item));
+}
+
+const ACC = {
+  direct: {
+    slotOf: (e, i) => (e.v.Slot ? Number(e.v.Slot.v) : i),
+    itemOf: (e) => e,
+  },
+  wrapped: {
+    slotOf: (e, i) => (e.v.slot ? Number(e.v.slot.v) : i),
+    itemOf: (e) => e.v.item,
+  },
+};
+
+function findItemLists(node) {
+  const out = [];
+  (function walk(n, path, depth) {
+    if (!n || depth > 8) return;
+    if (n.t === "list") {
+      if (isDirectItemList(n)) out.push({ path, node: n, style: "direct" });
+      else if (isWrappedItemList(n)) out.push({ path, node: n, style: "wrapped" });
+      return;
+    }
+    if (n.t === "compound")
+      for (const k of Object.keys(n.v))
+        walk(n.v[k], path ? path + "." + k : k, depth + 1);
+  })(node, "", 0);
+  return out;
+}
+
+// every inventory-shaped list in the file: Inventory + EnderItems first,
+// then anything else holding actual items (curios/baubles/accessories/
+// aether/mod attachments), labelled by its path
+function discoverInventories() {
+  const out = [];
+  const seen = new Set();
+  const push = (key, label, node, style) => {
+    if (!seen.has(key)) { seen.add(key); out.push({ key, label, node, style }); }
+  };
+  const inv = file.root.v.Inventory, end = file.root.v.EnderItems;
+  if (inv && inv.t === "list") push("Inventory", "inventory", inv, "direct");
+  if (end && end.t === "list") push("EnderItems", "ender chest", end, "direct");
+  for (const f of findItemLists(file.root))
+    if (f.path !== "Inventory" && f.path !== "EnderItems")
+      push(f.path, f.path.split(".").join(" / "), f.node, f.style);
+  return out;
+}
+
+function countKeyFor(listNode, style) {
+  if (style === "wrapped") return "count";
+  for (const it of listNode.v) {
+    if (it.t === "compound") {
+      if ("count" in it.v) return "count";
+      if ("Count" in it.v) return "Count";
+    }
+  }
+  return dataVersion() >= 3837 ? "count" : "Count";
+}
+
+function maxStackFor(id) {
+  const n = shortId(id);
+  if (/(sword|pickaxe|_axe$|^axe_|shovel|hoe$|helmet|chestplate|leggings|boots|^bow$|crossbow|trident|shield|elytra|potion$|bucket|saddle|shears|fishing_rod|flint_and_steel|shulker_box|_bed$|boat$|minecart|backpack|totem|broom)/.test(n))
+    return 1;
+  if (/(ender_pearl|snowball|^egg$|_sign$|honey_bottle|armor_stand|banner$)/.test(n))
+    return 16;
+  return 64;
+}
+
+// ---- enchantments (modern components map / legacy tag.Enchantments)
+
+function readEnchants(item) {
+  if (!item) return [];
+  const out = [];
+  const comp = item.v.components;
+  const e = comp && comp.t === "compound" && comp.v["minecraft:enchantments"];
+  if (e && e.t === "compound") {
+    const map = (e.v.levels && e.v.levels.t === "compound") ? e.v.levels : e;
+    for (const [k, v] of Object.entries(map.v))
+      if (!CONTAINERS.has(v.t)) out.push({ id: k, lvl: Number(v.v) });
+    return out;
+  }
+  const tag = item.v.tag;
+  const legacy = tag && tag.t === "compound" && tag.v.Enchantments;
+  if (legacy && legacy.t === "list")
+    for (const en of legacy.v)
+      if (en.t === "compound" && en.v.id)
+        out.push({ id: String(en.v.id.v), lvl: Number(en.v.lvl ? en.v.lvl.v : 1) });
+  return out;
+}
+
+function writeEnchants(item, enchants) {
+  const hasComp = item.v.components && item.v.components.t === "compound";
+  const hasTag = item.v.tag && item.v.tag.t === "compound";
+  const modern = hasComp || (!hasTag && dataVersion() >= 3837);
+  const norm = enchants
+    .filter((e) => e.id.trim())
+    .map((e) => ({ id: e.id.includes(":") ? e.id.trim() : "minecraft:" + e.id.trim(),
+                   lvl: Math.max(1, Math.round(Number(e.lvl) || 1)) }));
+  if (modern) {
+    if (!norm.length) {
+      if (hasComp) delete item.v.components.v["minecraft:enchantments"];
+      return;
+    }
+    if (!hasComp) item.v.components = { t: "compound", v: {} };
+    const existing = item.v.components.v["minecraft:enchantments"];
+    const map = { t: "compound", v: {} };
+    for (const e of norm) map.v[e.id] = { t: "int", v: e.lvl };
+    if (existing && existing.t === "compound" && existing.v.levels &&
+        existing.v.levels.t === "compound")
+      item.v.components.v["minecraft:enchantments"] = { t: "compound", v: { ...existing.v, levels: map } };
+    else
+      item.v.components.v["minecraft:enchantments"] = map;
+  } else {
+    if (!norm.length) {
+      if (hasTag) delete item.v.tag.v.Enchantments;
+      return;
+    }
+    if (!hasTag) item.v.tag = { t: "compound", v: {} };
+    item.v.tag.v.Enchantments = { t: "list", v: norm.map((e) => ({
+      t: "compound", v: { id: { t: "string", v: e.id }, lvl: { t: "short", v: e.lvl } },
+    }))};
+  }
+}
+
+// ---- item clipboard (localStorage: survives switching files)
+
+function clipRead() {
+  try { return JSON.parse(localStorage.getItem(CLIP_KEY)); } catch { return null; }
+}
+
+function clipWrite(item) {
+  const clone = JSON.parse(JSON.stringify(item));
+  delete clone.v.Slot;
+  delete clone.v.slot;
+  localStorage.setItem(CLIP_KEY, JSON.stringify(clone));
+}
+
+function clipToEntry(pane, slot) {
+  const item = clipRead();
+  if (!item) return null;
+  const cnt = Number((item.v.count || item.v.Count || {}).v || 1);
+  delete item.v.count;
+  delete item.v.Count;
+  const ck = countKeyFor(pane.node, pane.style);
+  if (pane.style === "direct") {
+    item.v.Slot = { t: "byte", v: slot };
+    item.v[ck] = { t: ck === "count" ? "int" : "byte", v: cnt };
+    return item;
+  }
+  item.v.count = { t: "int", v: cnt };
+  return { t: "compound", v: { slot: { t: "int", v: slot }, item } };
+}
+
+// ---- item modal
+
+function openItemModal(pane, slot, rerender) {
+  const acc = ACC[pane.style];
+  const idx = pane.node.v.findIndex((e, i) => acc.slotOf(e, i) === slot);
+  const entry = idx >= 0 ? pane.node.v[idx] : null;
+  const item = entry ? acc.itemOf(entry) : null;
+
+  const shell = modalShell("slot " + slot);
+  const b = shell.body;
+
+  const head = document.createElement("div");
+  head.className = "im-head";
+  let preview = iconBox(item ? String(item.v.id.v) : "minecraft:stone", "item", "im-icon");
+  head.appendChild(preview);
+  const idInput = document.createElement("input");
+  idInput.type = "text";
+  idInput.className = "pv-input wide";
+  idInput.placeholder = "minecraft:diamond";
+  idInput.value = item ? String(item.v.id.v) : "";
+  head.appendChild(idInput);
+  b.appendChild(head);
+
+  // count: slider capped at the stack size, number box free to exceed it
+  const cRow = document.createElement("div");
+  cRow.className = "im-row";
+  const cLabel = document.createElement("span");
+  cLabel.className = "flabel";
+  cLabel.textContent = "count";
+  cRow.appendChild(cLabel);
+  const cInput = document.createElement("input");
+  cInput.type = "text";
+  cInput.className = "pv-input count";
+  cInput.value = item ? String((item.v.count || item.v.Count || {}).v || 1) : "1";
+  const slider = miniSlider(1, maxStackFor(idInput.value || "x"), Number(cInput.value) || 1, 1,
+    (v) => { cInput.value = v; });
+  cRow.appendChild(slider.el);
+  cRow.appendChild(cInput);
+  b.appendChild(cRow);
+  cInput.addEventListener("input", () => slider.set(Number(cInput.value) || 1));
+  idInput.addEventListener("change", () => {
+    // refresh preview + stack cap for the new id
+    const nb = iconBox(idInput.value.trim() || "minecraft:stone", "item", "im-icon");
+    preview.replaceWith(nb);
+    preview = nb;
+  });
+
+  // enchantments
+  const enchWrap = document.createElement("div");
+  enchWrap.className = "im-ench";
+  const enchTitle = document.createElement("div");
+  enchTitle.className = "card-title";
+  enchTitle.textContent = "enchantments";
+  enchWrap.appendChild(enchTitle);
+  const enchRows = document.createElement("div");
+  enchWrap.appendChild(enchRows);
+  const enchants = readEnchants(item);
+  const renderEnch = () => {
+    enchRows.textContent = "";
+    enchants.forEach((e, i) => {
+      const r = document.createElement("div");
+      r.className = "ench-row";
+      const id = document.createElement("input");
+      id.type = "text";
+      id.className = "pv-input wide";
+      id.value = e.id;
+      id.addEventListener("input", () => { e.id = id.value; });
+      r.appendChild(id);
+      const lvl = document.createElement("input");
+      lvl.type = "text";
+      lvl.className = "pv-input count";
+      lvl.value = e.lvl;
+      lvl.addEventListener("input", () => { e.lvl = lvl.value; });
+      r.appendChild(lvl);
+      const del = document.createElement("button");
+      del.className = "mini-btn del";
+      del.textContent = "×";
+      del.addEventListener("click", () => { enchants.splice(i, 1); renderEnch(); });
+      r.appendChild(del);
+      enchRows.appendChild(r);
+    });
+    const add = document.createElement("button");
+    add.className = "mini-btn";
+    add.textContent = "+ add enchantment";
+    add.addEventListener("click", () => { enchants.push({ id: "minecraft:", lvl: 1 }); renderEnch(); });
+    enchRows.appendChild(add);
+  };
+  renderEnch();
+  b.appendChild(enchWrap);
+
+  // footer
+  const foot = document.createElement("div");
+  foot.className = "modal-foot";
+  if (item) {
+    const copy = document.createElement("button");
+    copy.className = "btn";
+    copy.textContent = "copy";
+    copy.addEventListener("click", () => {
+      clipWrite(pane.style === "wrapped" ? item : entry);
+      setStatus("copied " + shortId(String(item.v.id.v)), "ok");
+      shell.close();
+    });
+    foot.appendChild(copy);
+    const cut = document.createElement("button");
+    cut.className = "btn";
+    cut.textContent = "cut";
+    cut.addEventListener("click", () => {
+      clipWrite(pane.style === "wrapped" ? item : entry);
+      pane.node.v.splice(idx, 1);
+      setDirty(true);
+      setStatus("cut " + shortId(String(item.v.id.v)), "ok");
+      shell.close();
+      rerender();
+    });
+    foot.appendChild(cut);
+  }
+  if (clipRead()) {
+    const paste = document.createElement("button");
+    paste.className = "btn";
+    paste.textContent = "paste";
+    paste.addEventListener("click", () => {
+      const ne = clipToEntry(pane, slot);
+      if (!ne) return;
+      if (idx >= 0) pane.node.v.splice(idx, 1, ne);
+      else pane.node.v.push(ne);
+      setDirty(true);
+      shell.close();
+      rerender();
+    });
+    foot.appendChild(paste);
+  }
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  foot.appendChild(spacer);
+  if (entry) {
+    const del = document.createElement("button");
+    del.className = "btn danger";
+    del.textContent = "delete";
+    del.addEventListener("click", () => {
+      pane.node.v.splice(idx, 1);
+      setDirty(true);
+      shell.close();
+      rerender();
+    });
+    foot.appendChild(del);
+  }
+  const cancel = document.createElement("button");
+  cancel.className = "btn";
+  cancel.textContent = "cancel";
+  cancel.addEventListener("click", shell.close);
+  foot.appendChild(cancel);
+  const apply = document.createElement("button");
+  apply.className = "btn primary";
+  apply.textContent = item ? "apply" : "add";
+  apply.addEventListener("click", () => {
+    try {
+      let id = idInput.value.trim();
+      if (!id) throw new Error("item id required");
+      if (!id.includes(":")) id = "minecraft:" + id;
+      const count = Number(cInput.value);
+      if (!Number.isInteger(count) || count < 1) throw new Error("count must be a positive integer");
+      const ck = countKeyFor(pane.node, pane.style);
+      let target = item;
+      if (!target) {
+        if (pane.style === "direct") {
+          target = { t: "compound", v: {
+            Slot: { t: "byte", v: slot },
+            id: { t: "string", v: id },
+            [ck]: { t: ck === "count" ? "int" : "byte", v: count },
+          }};
+          pane.node.v.push(target);
+        } else {
+          target = { t: "compound", v: { id: { t: "string", v: id }, count: { t: "int", v: count } } };
+          pane.node.v.push({ t: "compound", v: { slot: { t: "int", v: slot }, item: target } });
+        }
+      } else {
+        target.v.id.v = id;
+        const cn = target.v.count || target.v.Count;
+        if (cn) cn.v = count;
+        else target.v[ck] = { t: ck === "count" ? "int" : "byte", v: count };
+      }
+      writeEnchants(target, enchants);
+      setDirty(true);
+      setStatus(null);
+      shell.close();
+      rerender();
+    } catch (e) { setStatus(String(e.message || e), "err"); }
+  });
+  foot.appendChild(apply);
+  b.appendChild(foot);
+  idInput.focus();
+}
+
+// ---- slot grid
+
+const ARMOR_SLOTS = [
+  [103, "head"], [102, "chest"], [101, "legs"], [100, "feet"], [-106, "offhand"],
+];
+
+function range(a, b) {
+  return Array.from({ length: b - a + 1 }, (_, i) => [a + i, null]);
+}
+
+function slotCell(pane, slot, entry, caption, state, rerender) {
+  const acc = ACC[pane.style];
+  const item = entry ? acc.itemOf(entry) : null;
+  const cell = document.createElement("div");
+  cell.className = "slot";
+  const box = document.createElement("div");
+  box.className = "icon-box" + (item ? "" : " empty");
+  cell.appendChild(box);
+
+  if (item) {
+    const id = String(item.v.id.v);
+    cell.dataset.q = shortId(id) + " " + id;
+    cell.title = id;
+    if (state.query && fuzzyScore(state.query, cell.dataset.q) < 0)
+      cell.classList.add("dimmed");
+    const n = document.createElement("div");
+    n.className = "iname";
+    n.textContent = shortId(id);
+    box.appendChild(n);
+    attachIcon(box, id, "item");
+    const cn = item.v.count || item.v.Count;
+    if (cn && Number(cn.v) !== 1) {
+      const c = document.createElement("div");
+      c.className = "icount";
+      c.textContent = cn.v;
+      box.appendChild(c);
+    }
+    const subs = findItemLists(item);
+    if (subs.length) {
+      box.classList.add("has-sub");
+      const m = document.createElement("div");
+      m.className = "isub";
+      m.textContent = "▸";
+      box.appendChild(m);
+      box.addEventListener("dblclick", () => {
+        state.stack.push({
+          label: shortId(id),
+          panes: subs.map((s) => ({ caption: s.path, node: s.node, style: s.style })),
+        });
+        rerender();
+      });
+    }
+    const name = document.createElement("div");
+    name.className = "slot-name";
+    name.textContent = shortId(id);
+    cell.appendChild(name);
+  } else if (caption) {
+    const c = document.createElement("div");
+    c.className = "icap";
+    c.textContent = caption;
+    box.appendChild(c);
+  }
+
+  box.addEventListener("click", () => openItemModal(pane, slot, rerender));
+  return cell;
+}
+
+function paneRows(pane, bySlot) {
+  const maxSlot = Math.max(26, ...bySlot.keys());
+  const rows = [];
+  const cap = maxSlot <= 53 ? maxSlot : 26;
+  for (let a = 0; a <= cap; a += 9)
+    rows.push(range(a, Math.min(a + 8, cap)));
+  return rows;
+}
+
+function renderPane(pane, state, rerender) {
+  const bySlot = new Map();
+  pane.node.v.forEach((e, i) => bySlot.set(ACC[pane.style].slotOf(e, i), e));
+
+  const wrap = document.createElement("div");
+  wrap.className = "inv-flex";
+  const left = document.createElement("div");
+  left.className = "inv-col";
+  wrap.appendChild(left);
+
+  let drawn;
+  if (pane.rootKey === "Inventory") {
+    // main + hotbar left, armor column on the right
+    for (const r of [range(9, 17), range(18, 26), range(27, 35)]) {
+      const row = document.createElement("div");
+      row.className = "inv-row";
+      for (const c of r) left.appendChild(row), row.appendChild(slotCell(pane, c[0], bySlot.get(c[0]), c[1], state, rerender));
+      left.appendChild(row);
+    }
+    const hot = document.createElement("div");
+    hot.className = "inv-row gap";
+    for (const c of range(0, 8)) hot.appendChild(slotCell(pane, c[0], bySlot.get(c[0]), c[1], state, rerender));
+    left.appendChild(hot);
+    const armor = document.createElement("div");
+    armor.className = "armor-col";
+    for (const [slot, cap] of ARMOR_SLOTS)
+      armor.appendChild(slotCell(pane, slot, bySlot.get(slot), cap, state, rerender));
+    wrap.appendChild(armor);
+    drawn = new Set([...range(0, 35).map((c) => c[0]), ...ARMOR_SLOTS.map((a) => a[0])]);
+  } else {
+    for (const r of paneRows(pane, bySlot)) {
+      const row = document.createElement("div");
+      row.className = "inv-row";
+      for (const c of r) row.appendChild(slotCell(pane, c[0], bySlot.get(c[0]), null, state, rerender));
+      left.appendChild(row);
+    }
+    drawn = new Set(paneRows(pane, bySlot).flat().map((c) => c[0]));
+  }
+
+  const extras = [...bySlot.keys()].filter((n) => !drawn.has(n)).sort((a, b) => a - b);
+  if (extras.length) {
+    const row = document.createElement("div");
+    row.className = "inv-row gap";
+    for (const n of extras) row.appendChild(slotCell(pane, n, bySlot.get(n), "slot " + n, state, rerender));
+    left.appendChild(row);
+  }
+  return wrap;
+}
+
+// roots: [{key,label,node,style}]; state mutated in place
+function renderInventoryBrowser(roots, state, rerender) {
+  const host = document.createElement("div");
+  host.className = "inv-browser";
+  if (!roots.length) {
+    const d = document.createElement("div");
+    d.className = "pv-hint";
+    d.textContent = "nothing inventory-shaped here";
+    host.appendChild(d);
+    return host;
+  }
+
+  let panes;
+  if (state.stack.length) panes = state.stack[state.stack.length - 1].panes;
+  else {
+    const root = roots.find((r) => r.key === state.rootKey) || roots[0];
+    state.rootKey = root.key;
+    panes = [{ caption: null, node: root.node, style: root.style,
+               rootKey: root.key === "Inventory" ? "Inventory" : null }];
+  }
+
+  // crumb bar
+  const bar = document.createElement("div");
+  bar.className = "crumb-bar";
+  const sel = document.createElement("select");
+  sel.className = "pv-select";
+  for (const r of roots) {
+    const o = document.createElement("option");
+    o.value = r.key;
+    o.textContent = r.label;
+    sel.appendChild(o);
+  }
+  sel.value = state.rootKey;
+  sel.addEventListener("change", () => {
+    state.rootKey = sel.value;
+    state.stack = [];
+    rerender();
+  });
+  bar.appendChild(sel);
+  state.stack.forEach((level, i) => {
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.textContent = "/";
+    bar.appendChild(sep);
+    const seg = document.createElement("button");
+    seg.className = "crumb" + (i === state.stack.length - 1 ? " here" : "");
+    seg.textContent = level.label;
+    seg.addEventListener("click", () => {
+      state.stack.length = i + 1;
+      rerender();
+    });
+    bar.appendChild(seg);
+  });
+  if (state.stack.length) {
+    const up = document.createElement("button");
+    up.className = "crumb";
+    up.textContent = "↩";
+    up.title = "up one level";
+    up.addEventListener("click", () => { state.stack.pop(); rerender(); });
+    bar.appendChild(up);
+  }
+  const spacer = document.createElement("span");
+  spacer.className = "crumb-spacer";
+  bar.appendChild(spacer);
+  const search = document.createElement("input");
+  search.type = "text";
+  search.className = "pv-input";
+  search.placeholder = "find item…";
+  search.value = state.query;
+  search.addEventListener("input", () => {
+    state.query = search.value.trim();
+    for (const cell of host.querySelectorAll(".slot"))
+      cell.classList.toggle("dimmed",
+        !!state.query && !!cell.dataset.q && fuzzyScore(state.query, cell.dataset.q) < 0);
+  });
+  bar.appendChild(search);
+  host.appendChild(bar);
+
+  panes.forEach((pane) => {
+    if (pane.caption) {
+      const cap = document.createElement("div");
+      cap.className = "pane-cap";
+      cap.textContent = pane.caption;
+      host.appendChild(cap);
+    }
+    host.appendChild(renderPane(pane, state, rerender));
+  });
+  return host;
+}
+
+// container list in the raw tree -> inventory editor in a modal
+function openInventoryModal(label, node, style) {
+  const shell = modalShell(label, true);
+  const state = { rootKey: label, stack: [], query: "" };
+  const rerender = () => {
+    shell.body.textContent = "";
+    shell.body.appendChild(renderInventoryBrowser(
+      [{ key: label, label, node, style }], state, rerender));
+  };
+  rerender();
+}
+
+// ------------------------------------------------------- player view
+
+const GAMEMODES = ["survival", "creative", "adventure", "spectator"];
+
 function viewTabs() {
   const bar = document.createElement("div");
   bar.className = "view-tabs";
@@ -500,7 +1313,6 @@ function viewTabs() {
   return bar;
 }
 
-// chip strip of every file belonging to the same player (graves, mod data…)
 function playerFileTabs(ctx) {
   const bar = document.createElement("div");
   bar.className = "file-tabs";
@@ -522,635 +1334,513 @@ function playerFileTabs(ctx) {
   return bar;
 }
 
-function pvSection(title) {
-  const s = document.createElement("div");
-  s.className = "pv-section";
-  const h = document.createElement("div");
-  h.className = "pv-title";
-  h.textContent = title;
-  s.appendChild(h);
-  const body = document.createElement("div");
-  body.className = "pv-fields";
-  s.appendChild(body);
-  s.body = body;
-  return s;
-}
-
-// Labelled always-visible input bound to a scalar tag node.
-function pvField(body, label, node, hint, wide) {
-  if (!node || CONTAINERS.has(node.t)) return;
-  const f = document.createElement("label");
-  f.className = "pv-field";
-  const l = document.createElement("span");
-  l.className = "pv-label";
-  l.textContent = label;
-  f.appendChild(l);
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "pv-input" + (wide ? " wide" : "");
-  input.value = node.v;
-  const commit = () => {
-    if (String(node.v) === input.value.trim()) return;
-    try {
-      node.v = validateScalar(node.t, input.value);
-      input.value = node.v;
-      input.classList.remove("bad");
-      setDirty(true);
-      setStatus(null);
-    } catch (e) {
-      input.classList.add("bad");
-      setStatus(label + ": " + (e.message || e), "err");
-    }
-  };
-  input.addEventListener("change", commit);
-  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") commit(); });
-  f.appendChild(input);
-  if (hint) {
-    const h = document.createElement("span");
-    h.className = "pv-hint";
-    h.textContent = hint;
-    f.appendChild(h);
+function maxHealth() {
+  for (const [listKey, idKey, valKey] of [["attributes", "id", "base"],
+                                          ["Attributes", "Name", "Base"]]) {
+    const list = tpath(file.root, listKey);
+    if (list && list.t === "list")
+      for (const a of list.v) {
+        if (a.t !== "compound") continue;
+        const id = a.v[idKey] ? String(a.v[idKey].v) : "";
+        if (/max_health|maxHealth/i.test(id) && a.v[valKey])
+          return Number(a.v[valKey].v);
+      }
   }
-  body.appendChild(f);
+  return 20;
 }
 
-// Toggle chip bound to a 0/1 byte tag.
-function pvBool(body, label, node) {
-  if (!node) return;
-  const b = document.createElement("button");
-  b.className = "pv-chip" + (node.v ? " on" : "");
-  b.textContent = label;
-  b.addEventListener("click", () => {
-    node.v = node.v ? 0 : 1;
-    b.classList.toggle("on", !!node.v);
-    setDirty(true);
-  });
-  body.appendChild(b);
-}
-
-function pvGamemode(body, node) {
-  if (!node) return;
-  const f = document.createElement("label");
-  f.className = "pv-field";
-  const l = document.createElement("span");
-  l.className = "pv-label";
-  l.textContent = "gamemode";
-  f.appendChild(l);
-  const sel = document.createElement("select");
-  sel.className = "pv-select";
-  GAMEMODES.forEach((g, i) => {
-    const o = document.createElement("option");
-    o.value = i;
-    o.textContent = g;
-    sel.appendChild(o);
-  });
-  if (node.v < 0 || node.v > 3) {
-    const o = document.createElement("option");
-    o.value = node.v;
-    o.textContent = "mode " + node.v;
-    sel.appendChild(o);
-  }
-  sel.value = node.v;
-  sel.addEventListener("change", () => {
-    node.v = Number(sel.value);
-    setDirty(true);
-  });
-  f.appendChild(sel);
-  body.appendChild(f);
-}
-
-// ------------------------------------------------------- potion effects
-
-// 1.20.2 (DataVersion 3578) renamed ActiveEffects -> active_effects and
-// the per-effect keys from Id/Amplifier/Duration to id/amplifier/duration.
-function effectsSection() {
+function vitalsCard() {
   const r = file.root;
-  let list = tpath(r, "active_effects");
+  const c = card("vitals");
+  const health = frow(c.body, "health");
+  addNum(health, tpath(r, "Health"), "num");
+  const max = document.createElement("span");
+  max.className = "pv-label";
+  max.textContent = "/ " + maxHealth();
+  health.appendChild(max);
+  numRow(c.body, "food", tpath(r, "foodLevel"), "num");
+  numRow(c.body, "saturation", tpath(r, "foodSaturationLevel"), "num");
+  numRow(c.body, "air", tpath(r, "Air"), "num");
+  numRow(c.body, "fire", tpath(r, "Fire"), "num");
+  numRow(c.body, "absorption", tpath(r, "AbsorptionAmount"), "num");
+  const gm = tpath(r, "playerGameType");
+  if (gm) {
+    const ctls = frow(c.body, "gamemode");
+    const sel = document.createElement("select");
+    sel.className = "pv-select";
+    GAMEMODES.forEach((g, i) => {
+      const o = document.createElement("option");
+      o.value = i;
+      o.textContent = g;
+      sel.appendChild(o);
+    });
+    if (gm.v < 0 || gm.v > 3) {
+      const o = document.createElement("option");
+      o.value = gm.v;
+      o.textContent = "mode " + gm.v;
+      sel.appendChild(o);
+    }
+    sel.value = gm.v;
+    sel.addEventListener("change", () => { gm.v = Number(sel.value); setDirty(true); });
+    ctls.appendChild(sel);
+  }
+  return c;
+}
+
+function positionCard() {
+  const r = file.root;
+  const c = card("position");
+  const p = tpath(r, "Pos");
+  if (p && p.t === "list" && p.v.length === 3) {
+    const ctls = frow(c.body, "position");
+    for (const n of p.v) addNum(ctls, n, "coord");
+  }
+  const rot = tpath(r, "Rotation");
+  if (rot && rot.t === "list" && rot.v.length === 2) {
+    const ctls = frow(c.body, "angle");
+    for (const n of rot.v) addNum(ctls, n, "coord");
+  }
+  numRow(c.body, "dimension", tpath(r, "Dimension"), "wide");
+  return c;
+}
+
+function spawnCard() {
+  const r = file.root;
+  const sx = tpath(r, "SpawnX"), sy = tpath(r, "SpawnY"), sz = tpath(r, "SpawnZ");
+  if (!sx && !sy && !sz) return null;
+  const c = card("spawnpoint");
+  const ctls = frow(c.body, "spawn");
+  addNum(ctls, sx, "coord");
+  addNum(ctls, sy, "coord");
+  addNum(ctls, sz, "coord");
+  numRow(c.body, "dimension", tpath(r, "SpawnDimension"), "wide");
+  return c;
+}
+
+function experienceCard() {
+  const r = file.root;
+  const c = card("experience");
+  numRow(c.body, "level", tpath(r, "XpLevel"), "num");
+  const prog = tpath(r, "XpP");
+  if (prog) {
+    const ctls = frow(c.body, "progress");
+    const pct = document.createElement("span");
+    pct.className = "pv-label msl-pct";
+    const upd = (v) => { pct.textContent = Math.round(v * 100) + "%"; };
+    const sl = miniSlider(0, 1, Number(prog.v), 0.01, (v) => {
+      prog.v = Math.round(v * 1000) / 1000;
+      upd(v);
+      setDirty(true);
+    });
+    upd(Number(prog.v));
+    ctls.appendChild(sl.el);
+    ctls.appendChild(pct);
+  }
+  numRow(c.body, "total", tpath(r, "XpTotal"), "num");
+  numRow(c.body, "score", tpath(r, "Score"), "num");
+  return c;
+}
+
+function abilitiesCard() {
+  const r = file.root;
+  const c = card("abilities");
+  switchRow(c.body, "invulnerable", tpath(r, "abilities.invulnerable"));
+  switchRow(c.body, "may fly", tpath(r, "abilities.mayfly"));
+  switchRow(c.body, "flying", tpath(r, "abilities.flying"));
+  switchRow(c.body, "instabuild", tpath(r, "abilities.instabuild"));
+  switchRow(c.body, "may build", tpath(r, "abilities.mayBuild"));
+  numRow(c.body, "walk speed", tpath(r, "abilities.walkSpeed"), "num");
+  numRow(c.body, "fly speed", tpath(r, "abilities.flySpeed"), "num");
+  return c;
+}
+
+function effectsList() {
+  let list = tpath(file.root, "active_effects");
   let modern = true;
   if (!list) {
-    list = tpath(r, "ActiveEffects");
+    list = tpath(file.root, "ActiveEffects");
     if (list) modern = false;
     else modern = dataVersion() >= 3578;
   }
+  return { list, modern };
+}
 
-  const s = pvSection("potion effects");
+function quickActionsCard() {
+  const r = file.root;
+  const c = card("quick actions");
+  const p = tpath(r, "Pos");
+  if (p && p.t === "list" && p.v.length === 3) {
+    const ctls = frow(c.body, "teleport");
+    const ins = p.v.map((n) => {
+      const i = document.createElement("input");
+      i.type = "text";
+      i.className = "pv-input coord";
+      i.value = Math.round(Number(n.v) * 100) / 100;
+      ctls.appendChild(i);
+      return i;
+    });
+    const go = document.createElement("button");
+    go.className = "btn primary";
+    go.textContent = "go";
+    go.addEventListener("click", () => {
+      try {
+        ins.forEach((i, k) => { p.v[k].v = validateScalar(p.v[k].t, i.value); });
+        setDirty(true);
+        setStatus("position set", "ok");
+        renderEditor();
+      } catch (e) { setStatus(String(e.message || e), "err"); }
+    });
+    ctls.appendChild(go);
+  }
+  const btns = document.createElement("div");
+  btns.className = "qa-btns";
+  const heal = document.createElement("button");
+  heal.className = "btn";
+  heal.textContent = "full heal";
+  heal.addEventListener("click", () => {
+    const h = tpath(r, "Health");
+    if (h) { h.v = maxHealth(); setDirty(true); renderEditor(); }
+  });
+  btns.appendChild(heal);
+  const clear = document.createElement("button");
+  clear.className = "btn";
+  clear.textContent = "clear effects";
+  clear.addEventListener("click", () => {
+    const { list } = effectsList();
+    if (list && list.v.length) { list.v = []; setDirty(true); renderEditor(); }
+  });
+  btns.appendChild(clear);
+  c.body.appendChild(btns);
+  return c;
+}
+
+async function loadEffectIds() {
+  const server = fileServer();
+  if (!server || effectIdsLoaded === server) return;
+  let mod = [];
+  try { mod = (await api("/api/effects?server=" + encodeURIComponent(server))).effects; }
+  catch { /* mods dir may not exist */ }
+  const all = [...new Set([...VANILLA_EFFECTS, ...mod])].sort();
+  const dl = $("effect-ids");
+  dl.textContent = "";
+  for (const id of all) {
+    const o = document.createElement("option");
+    o.value = id;
+    dl.appendChild(o);
+  }
+  effectIdsLoaded = server;
+}
+
+function openEffectModal() {
+  const { list, modern } = effectsList();
+  const shell = modalShell("add effect");
+  const b = shell.body;
+
+  const idCtls = frow(b, "effect");
+  const idInput = document.createElement("input");
+  idInput.type = "text";
+  idInput.className = "pv-input wide";
+  idInput.setAttribute("list", "effect-ids");
+  idInput.placeholder = modern ? "minecraft:speed" : "numeric id";
+  idInput.value = modern ? "" : "1";
+  idCtls.appendChild(idInput);
+
+  const ampCtls = frow(b, "amplifier");
+  const amp = document.createElement("input");
+  amp.type = "text";
+  amp.className = "pv-input count";
+  amp.value = "0";
+  ampCtls.appendChild(amp);
+
+  const durCtls = frow(b, "duration");
+  const dur = document.createElement("input");
+  dur.type = "text";
+  dur.className = "pv-input num";
+  dur.value = "1200";
+  durCtls.appendChild(dur);
+
+  const foot = document.createElement("div");
+  foot.className = "modal-foot";
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  foot.appendChild(spacer);
+  const cancel = document.createElement("button");
+  cancel.className = "btn";
+  cancel.textContent = "cancel";
+  cancel.addEventListener("click", shell.close);
+  foot.appendChild(cancel);
+  const add = document.createElement("button");
+  add.className = "btn primary";
+  add.textContent = "add";
+  add.addEventListener("click", () => {
+    try {
+      const a = validateScalar("byte", amp.value);
+      const d = validateScalar("int", dur.value);
+      let target = effectsList().list;
+      if (!target) {
+        const key = modern ? "active_effects" : "ActiveEffects";
+        file.root.v[key] = { t: "list", v: [] };
+        target = file.root.v[key];
+      }
+      if (modern) {
+        let id = idInput.value.trim();
+        if (!id) throw new Error("effect id required");
+        if (!id.includes(":")) id = "minecraft:" + id;
+        target.v.push({ t: "compound", v: {
+          id: { t: "string", v: id },
+          amplifier: { t: "byte", v: a },
+          duration: { t: "int", v: d },
+          ambient: { t: "byte", v: 0 },
+          show_particles: { t: "byte", v: 1 },
+          show_icon: { t: "byte", v: 1 },
+        }});
+      } else {
+        const num = Number(idInput.value.trim());
+        if (!Number.isInteger(num)) throw new Error("this file uses numeric effect ids");
+        target.v.push({ t: "compound", v: {
+          Id: { t: "int", v: num },
+          Amplifier: { t: "byte", v: a },
+          Duration: { t: "int", v: d },
+          Ambient: { t: "byte", v: 0 },
+          ShowParticles: { t: "byte", v: 1 },
+          ShowIcon: { t: "byte", v: 1 },
+        }});
+      }
+      setDirty(true);
+      shell.close();
+      renderEditor();
+    } catch (e) { setStatus(String(e.message || e), "err"); }
+  });
+  foot.appendChild(add);
+  b.appendChild(foot);
+  idInput.focus();
+}
+
+function effectsCard() {
+  const { list, modern } = effectsList();
+  const c = card("potion effects", true);
+  const wrap = document.createElement("div");
+  wrap.className = "effect-cards";
+  c.body.appendChild(wrap);
+
   const K = modern
-    ? { id: "id", amp: "amplifier", dur: "duration", amb: "ambient", part: "show_particles", icon: "show_icon" }
-    : { id: "Id", amp: "Amplifier", dur: "Duration", amb: "Ambient", part: "ShowParticles", icon: "ShowIcon" };
-
-  const col = document.createElement("div");
-  col.className = "effect-col";
-  s.body.appendChild(col);
+    ? { id: "id", amp: "amplifier", dur: "duration" }
+    : { id: "Id", amp: "Amplifier", dur: "Duration" };
 
   (list ? list.v : []).forEach((eff, i) => {
     if (eff.t !== "compound") return;
-    const row = document.createElement("div");
-    row.className = "effect-row";
-    pvField(row, "effect", tpath(eff, K.id), null, true);
-    pvField(row, "amplifier", tpath(eff, K.amp), "0 = level I");
-    pvField(row, "duration", tpath(eff, K.dur), "ticks · -1 = ∞");
-    pvBool(row, "ambient", tpath(eff, K.amb));
-    pvBool(row, "particles", tpath(eff, K.part));
+    const ec = document.createElement("div");
+    ec.className = "effect-card";
     const del = document.createElement("button");
-    del.className = "mini-btn del";
+    del.className = "mini-btn del fx-close";
     del.textContent = "×";
-    del.title = "remove effect";
     del.addEventListener("click", () => {
       list.v.splice(i, 1);
       setDirty(true);
       renderEditor();
     });
-    row.appendChild(del);
-    col.appendChild(row);
+    ec.appendChild(del);
+
+    const head = document.createElement("div");
+    head.className = "fx-head";
+    const idNode = eff.v[K.id];
+    if (idNode && idNode.t === "string")
+      head.appendChild(iconBox(String(idNode.v), "effect"));
+    if (idNode) {
+      const idInput = boundInput(idNode, "wide");
+      if (idNode.t === "string") idInput.setAttribute("list", "effect-ids");
+      head.appendChild(idInput);
+    }
+    ec.appendChild(head);
+
+    const rowEl = document.createElement("div");
+    rowEl.className = "fx-row";
+    const ampNode = eff.v[K.amp], durNode = eff.v[K.dur];
+    if (ampNode) {
+      const l = document.createElement("span");
+      l.className = "pv-label";
+      l.textContent = "amplifier";
+      rowEl.appendChild(l);
+      rowEl.appendChild(boundInput(ampNode, "count"));
+    }
+    if (durNode) {
+      const l = document.createElement("span");
+      l.className = "pv-label";
+      l.textContent = "duration";
+      rowEl.appendChild(l);
+      rowEl.appendChild(boundInput(durNode, "num"));
+    }
+    ec.appendChild(rowEl);
+    wrap.appendChild(ec);
   });
 
-  const add = document.createElement("button");
-  add.className = "btn";
-  add.textContent = "add effect";
-  add.addEventListener("click", () => {
-    if (!list) {
-      const key = modern ? "active_effects" : "ActiveEffects";
-      r.v[key] = { t: "list", v: [] };
-      list = r.v[key];
-    }
-    list.v.push({ t: "compound", v: modern ? {
-      id: { t: "string", v: "minecraft:speed" },
-      amplifier: { t: "byte", v: 0 },
-      duration: { t: "int", v: 1200 },
-      ambient: { t: "byte", v: 0 },
-      show_particles: { t: "byte", v: 1 },
-      show_icon: { t: "byte", v: 1 },
-    } : {
-      Id: { t: "int", v: 1 },
-      Amplifier: { t: "byte", v: 0 },
-      Duration: { t: "int", v: 1200 },
-      Ambient: { t: "byte", v: 0 },
-      ShowParticles: { t: "byte", v: 1 },
-      ShowIcon: { t: "byte", v: 1 },
-    }});
-    setDirty(true);
-    renderEditor();
-  });
-  s.body.appendChild(add);
-  return s;
+  const addCard = document.createElement("button");
+  addCard.className = "effect-card add";
+  addCard.textContent = "+ add effect";
+  addCard.addEventListener("click", openEffectModal);
+  wrap.appendChild(addCard);
+  return c;
 }
 
-// ------------------------------------------------- inventory browser
-//
-// One pane with a file-browser crumb trail. The trail starts with a dropdown
-// of every root-level tag that looks like an inventory (Inventory, EnderItems,
-// mod lists of item compounds). Double-clicking an item that contains
-// sub-inventories (shulker component container, legacy BlockEntityTag.Items,
-// modded backpacks/graves — any nested list of item-shaped compounds)
-// descends into it.
-
-function isItemCompound(n) {
-  return n && n.t === "compound" && n.v.id && n.v.id.t === "string";
-}
-
-function isDirectItemList(n) {
-  return n && n.t === "list" && n.v.length > 0 &&
-    n.v.every((e) => e.t === "compound") && n.v.some(isItemCompound);
-}
-
-// components container style: list of {slot, item}
-function isWrappedItemList(n) {
-  return n && n.t === "list" && n.v.length > 0 &&
-    n.v.every((e) => e.t === "compound") &&
-    n.v.some((e) => isItemCompound(e.v.item));
-}
-
-const ACC = {
-  direct: {
-    slotOf: (e, i) => (e.v.Slot ? Number(e.v.Slot.v) : i),
-    itemOf: (e) => e,
-    make: (slot, id, count, ck) => ({ t: "compound", v: {
-      Slot: { t: "byte", v: slot },
-      id: { t: "string", v: id },
-      [ck]: { t: ck === "count" ? "int" : "byte", v: count },
-    }}),
-  },
-  wrapped: {
-    slotOf: (e, i) => (e.v.slot ? Number(e.v.slot.v) : i),
-    itemOf: (e) => e.v.item,
-    make: (slot, id, count) => ({ t: "compound", v: {
-      slot: { t: "int", v: slot },
-      item: { t: "compound", v: {
-        id: { t: "string", v: id },
-        count: { t: "int", v: count },
-      }},
-    }}),
-  },
-};
-
-// every nested item-list inside an item (its sub-inventories)
-function findItemLists(node) {
-  const out = [];
-  (function walk(n, path, depth) {
-    if (!n || depth > 6) return;
-    if (n.t === "list") {
-      if (isDirectItemList(n)) out.push({ path, node: n, style: "direct" });
-      else if (isWrappedItemList(n)) out.push({ path, node: n, style: "wrapped" });
-      return;
-    }
-    if (n.t === "compound")
-      for (const k of Object.keys(n.v))
-        walk(n.v[k], path ? path + "." + k : k, depth + 1);
-  })(node, "", 0);
-  return out;
-}
-
-function rootInventories() {
-  const out = [];
-  for (const [k, n] of Object.entries(file.root.v)) {
-    if (n.t !== "list") continue;
-    if (k === "Inventory" || k === "EnderItems" || isDirectItemList(n))
-      out.push({ key: k,
-                 label: k === "Inventory" ? "inventory"
-                      : k === "EnderItems" ? "ender chest" : k,
-                 node: n });
-  }
-  out.sort((a, b) =>
-    (a.key === "Inventory" ? 0 : a.key === "EnderItems" ? 1 : 2) -
-    (b.key === "Inventory" ? 0 : b.key === "EnderItems" ? 1 : 2) ||
-    a.key.localeCompare(b.key));
-  return out;
-}
-
-function currentPanes() {
-  if (invStack.length) return invStack[invStack.length - 1].panes;
-  const roots = rootInventories();
-  const root = roots.find((r) => r.key === invRootKey) || roots[0];
-  if (!root) return [];
-  invRootKey = root.key;
-  return [{ caption: null, node: root.node, style: "direct", rootKey: root.key }];
-}
-
-function countKeyFor(listNode, style) {
-  if (style === "wrapped") return "count";
-  for (const it of listNode.v) {
-    if (it.t === "compound") {
-      if ("count" in it.v) return "count";
-      if ("Count" in it.v) return "Count";
-    }
-  }
-  return dataVersion() >= 3837 ? "count" : "Count";
-}
-
-function shortId(id) {
-  return id.startsWith("minecraft:") ? id.slice(10) : id;
-}
-
-// icon fallback chain: server mod jars -> vanilla CDN item -> CDN block -> text
-function attachIcon(cell, id) {
-  const [ns, name] = id.includes(":") ? id.split(":", 2) : ["minecraft", id];
-  const urls = [`/api/icon?server=${encodeURIComponent(fileServer())}&id=${encodeURIComponent(id)}`];
-  if (ns === "minecraft")
-    urls.push(`${VANILLA_CDN}/item/${name}.png`, `${VANILLA_CDN}/block/${name}.png`);
-  const img = document.createElement("img");
-  let i = 0;
-  img.onerror = () => {
-    i++;
-    if (i < urls.length) img.src = urls[i];
-    else { img.remove(); cell.classList.remove("has-icon"); }
+function itemsCard() {
+  const c = card("items", true);
+  const host = document.createElement("div");
+  c.body.appendChild(host);
+  const rerender = () => {
+    host.textContent = "";
+    host.appendChild(renderInventoryBrowser(discoverInventories(), invState, rerender));
   };
-  img.onload = () => cell.classList.add("has-icon");
-  img.src = urls[0];
-  img.alt = "";
-  img.draggable = false;
-  cell.appendChild(img);
-}
-
-function slotCell(paneIdx, slot, entry, caption, pane) {
-  const acc = ACC[pane.style];
-  const item = entry ? acc.itemOf(entry) : null;
-  const cell = document.createElement("div");
-  const sel = invSel && invSel.pane === paneIdx && invSel.slot === slot;
-  cell.className = "slot" + (item ? "" : " empty") + (sel ? " sel" : "");
-
-  if (item) {
-    const id = String(item.v.id.v);
-    cell.title = id;
-    if (invQuery && fuzzyScore(invQuery, shortId(id) + " " + id) < 0)
-      cell.classList.add("dimmed");
-    const n = document.createElement("div");
-    n.className = "iname";
-    n.textContent = shortId(id);
-    cell.appendChild(n);
-    attachIcon(cell, id);
-    const cn = item.v.count || item.v.Count;
-    if (cn && Number(cn.v) !== 1) {
-      const c = document.createElement("div");
-      c.className = "icount";
-      c.textContent = cn.v;
-      cell.appendChild(c);
-    }
-    const subs = findItemLists(item);
-    if (subs.length) {
-      cell.classList.add("has-sub");
-      cell.title = id + " — double-click to open contents";
-      const m = document.createElement("div");
-      m.className = "isub";
-      m.textContent = "▸";
-      cell.appendChild(m);
-      cell.addEventListener("dblclick", () => {
-        invStack.push({
-          label: shortId(id),
-          panes: subs.map((sub) => ({ caption: sub.path, node: sub.node, style: sub.style })),
-        });
-        invSel = null;
-        renderEditor();
-      });
-    }
-  } else {
-    cell.title = caption ? caption + " (empty)" : "empty — click to add";
-    if (caption) {
-      const c = document.createElement("div");
-      c.className = "icap";
-      c.textContent = caption;
-      cell.appendChild(c);
-    }
-  }
-
-  cell.addEventListener("click", () => {
-    invSel = sel ? null : { pane: paneIdx, slot };
-    renderEditor();
-  });
-  return cell;
-}
-
-function itemEditor(paneIdx, pane) {
-  const acc = ACC[pane.style];
-  const slot = invSel.slot;
-  const idx = pane.node.v.findIndex((e, i) => acc.slotOf(e, i) === slot);
-  const entry = idx >= 0 ? pane.node.v[idx] : null;
-  const item = entry ? acc.itemOf(entry) : null;
-
-  const ed = document.createElement("div");
-  ed.className = "item-edit";
-
-  const slotLabel = document.createElement("span");
-  slotLabel.className = "pv-label";
-  slotLabel.textContent = "slot " + slot;
-  ed.appendChild(slotLabel);
-
-  const idInput = document.createElement("input");
-  idInput.type = "text";
-  idInput.className = "pv-input wide";
-  idInput.placeholder = "minecraft:diamond";
-  idInput.value = item ? String(item.v.id.v) : "";
-  ed.appendChild(idInput);
-
-  const cInput = document.createElement("input");
-  cInput.type = "text";
-  cInput.className = "pv-input count";
-  cInput.value = item ? String((item.v.count || item.v.Count)?.v ?? 1) : "1";
-  ed.appendChild(cInput);
-
-  const apply = document.createElement("button");
-  apply.className = "btn primary";
-  apply.textContent = item ? "apply" : "add";
-  apply.addEventListener("click", () => {
-    try {
-      let id = idInput.value.trim();
-      if (!id) throw new Error("item id required");
-      if (!id.includes(":")) id = "minecraft:" + id;
-      const count = Number(cInput.value);
-      if (!Number.isInteger(count) || count < 1) throw new Error("count must be a positive integer");
-      const ck = countKeyFor(pane.node, pane.style);
-      if (item) {
-        item.v.id.v = id;
-        const cn = item.v.count || item.v.Count;
-        if (cn) cn.v = count;
-        else item.v[ck] = { t: ck === "count" ? "int" : "byte", v: count };
-      } else {
-        pane.node.v.push(acc.make(slot, id, count, ck));
-      }
-      setDirty(true);
-      setStatus(null);
-      renderEditor();
-    } catch (e) { setStatus(String(e.message || e), "err"); }
-  });
-  ed.appendChild(apply);
-
-  if (entry) {
-    const del = document.createElement("button");
-    del.className = "btn danger";
-    del.textContent = "delete";
-    del.addEventListener("click", () => {
-      pane.node.v.splice(idx, 1);
-      invSel = null;
-      setDirty(true);
-      renderEditor();
-    });
-    ed.appendChild(del);
-  }
-
-  const note = document.createElement("span");
-  note.className = "pv-hint";
-  note.textContent = item ? "enchantments & other item data are preserved — edit them in raw nbt" : "";
-  ed.appendChild(note);
-  return ed;
-}
-
-const ARMOR_SLOTS = [
-  [103, "head"], [102, "chest"], [101, "legs"], [100, "feet"], [-106, "offhand"],
-];
-
-function range(a, b) {
-  return Array.from({ length: b - a + 1 }, (_, i) => [a + i, null]);
-}
-
-function paneLayout(pane, bySlot) {
-  if (pane.rootKey === "Inventory")
-    return [
-      { slots: ARMOR_SLOTS },
-      { slots: range(9, 17), gap: true },
-      { slots: range(18, 26) },
-      { slots: range(27, 35) },
-      { slots: range(0, 8), gap: true },   // hotbar
-    ];
-  const maxSlot = Math.max(26, ...bySlot.keys());
-  const rows = [];
-  if (maxSlot <= 53)
-    for (let a = 0; a <= maxSlot; a += 9)
-      rows.push({ slots: range(a, Math.min(a + 8, maxSlot)) });
-  else
-    for (let a = 0; a <= 26; a += 9)
-      rows.push({ slots: range(a, a + 8) });
-  return rows;
-}
-
-function crumbBar() {
-  const bar = document.createElement("div");
-  bar.className = "crumb-bar";
-
-  const roots = rootInventories();
-  const sel = document.createElement("select");
-  sel.className = "pv-select";
-  for (const r of roots) {
-    const o = document.createElement("option");
-    o.value = r.key;
-    o.textContent = r.label;
-    sel.appendChild(o);
-  }
-  sel.value = invRootKey || (roots[0] && roots[0].key) || "";
-  sel.addEventListener("change", () => {
-    invRootKey = sel.value;
-    invStack = [];
-    invSel = null;
-    renderEditor();
-  });
-  bar.appendChild(sel);
-
-  invStack.forEach((level, i) => {
-    const sep = document.createElement("span");
-    sep.className = "crumb-sep";
-    sep.textContent = "/";
-    bar.appendChild(sep);
-    const seg = document.createElement("button");
-    seg.className = "crumb" + (i === invStack.length - 1 ? " here" : "");
-    seg.textContent = level.label;
-    seg.addEventListener("click", () => {
-      invStack.length = i + 1;
-      invSel = null;
-      renderEditor();
-    });
-    bar.appendChild(seg);
-  });
-
-  const spacer = document.createElement("span");
-  spacer.className = "crumb-spacer";
-  bar.appendChild(spacer);
-
-  const search = document.createElement("input");
-  search.type = "text";
-  search.className = "pv-input";
-  search.placeholder = "find item…";
-  search.value = invQuery;
-  search.addEventListener("input", () => {
-    invQuery = search.value.trim();
-    const editor = $("editor");
-    for (const cell of editor.querySelectorAll(".slot")) {
-      const id = cell.title.split(" ")[0];
-      cell.classList.toggle("dimmed",
-        !!invQuery && !cell.classList.contains("empty") &&
-        fuzzyScore(invQuery, shortId(id) + " " + id) < 0);
-    }
-  });
-  bar.appendChild(search);
-  return bar;
-}
-
-function inventorySection() {
-  const s = pvSection("items");
-  s.body.classList.add("inv-body");
-  const panes = currentPanes();
-  if (!panes.length) {
-    const d = document.createElement("div");
-    d.className = "pv-hint";
-    d.textContent = "no inventory tags in this file";
-    s.body.appendChild(d);
-    return s;
-  }
-  s.body.appendChild(crumbBar());
-
-  panes.forEach((pane, paneIdx) => {
-    if (pane.caption) {
-      const cap = document.createElement("div");
-      cap.className = "pane-cap";
-      cap.textContent = pane.caption;
-      s.body.appendChild(cap);
-    }
-    const bySlot = new Map();
-    pane.node.v.forEach((e, i) => bySlot.set(ACC[pane.style].slotOf(e, i), e));
-
-    const col = document.createElement("div");
-    col.className = "inv-col";
-    const layout = paneLayout(pane, bySlot);
-    for (const row of layout) {
-      const r = document.createElement("div");
-      r.className = "inv-row" + (row.gap ? " gap" : "");
-      for (const cell of row.slots)
-        r.appendChild(slotCell(paneIdx, cell[0], bySlot.get(cell[0]), cell[1], pane));
-      col.appendChild(r);
-    }
-    const drawn = new Set(layout.flatMap((r) => r.slots.map((c) => c[0])));
-    const extras = [...bySlot.keys()].filter((n) => !drawn.has(n)).sort((a, b) => a - b);
-    if (extras.length) {
-      const r = document.createElement("div");
-      r.className = "inv-row gap";
-      for (const n of extras)
-        r.appendChild(slotCell(paneIdx, n, bySlot.get(n), "slot " + n, pane));
-      col.appendChild(r);
-    }
-    s.body.appendChild(col);
-
-    if (invSel && invSel.pane === paneIdx)
-      s.body.appendChild(itemEditor(paneIdx, pane));
-  });
-  return s;
+  rerender();
+  return c;
 }
 
 function renderPlayerView() {
-  const r = file.root;
-  const v = document.createElement("div");
-  v.className = "player-view";
+  const layout = document.createElement("div");
+  layout.className = "pv-layout";
+  const main = document.createElement("div");
+  main.className = "pv-main";
+  const side = document.createElement("div");
+  side.className = "pv-side";
 
-  const vit = pvSection("vitals");
-  pvField(vit.body, "health", tpath(r, "Health"), "20 = full");
-  pvField(vit.body, "food", tpath(r, "foodLevel"), "/ 20");
-  pvField(vit.body, "saturation", tpath(r, "foodSaturationLevel"));
-  pvField(vit.body, "air", tpath(r, "Air"), "/ 300");
-  pvField(vit.body, "fire", tpath(r, "Fire"), "-20 = off");
-  pvField(vit.body, "absorption", tpath(r, "AbsorptionAmount"));
-  pvGamemode(vit.body, tpath(r, "playerGameType"));
-  v.appendChild(vit);
+  main.appendChild(positionCard());
+  main.appendChild(abilitiesCard());
+  main.appendChild(experienceCard());
+  const sp = spawnCard();
+  if (sp) main.appendChild(sp);
+  main.appendChild(effectsCard());
+  main.appendChild(itemsCard());
 
-  const xp = pvSection("experience");
-  pvField(xp.body, "level", tpath(r, "XpLevel"));
-  pvField(xp.body, "progress", tpath(r, "XpP"), "0 – 1");
-  pvField(xp.body, "total", tpath(r, "XpTotal"));
-  pvField(xp.body, "score", tpath(r, "Score"));
-  v.appendChild(xp);
+  side.appendChild(quickActionsCard());
+  side.appendChild(vitalsCard());
 
-  const pos = pvSection("position");
-  const p = tpath(r, "Pos");
-  if (p && p.t === "list" && p.v.length === 3) {
-    pvField(pos.body, "x", p.v[0]);
-    pvField(pos.body, "y", p.v[1]);
-    pvField(pos.body, "z", p.v[2]);
+  layout.appendChild(main);
+  layout.appendChild(side);
+  return layout;
+}
+
+// -------------------------------------------------------- server view
+//
+// Clicking a server in the sidebar shows a grid of player cards (3D
+// spinning skins via skinview3d, falling back to a flat body render, then
+// to an initial avatar) plus the server's world files as large buttons.
+
+let skinLibPromise = null;
+
+function loadSkinLib() {
+  if (!skinLibPromise)
+    skinLibPromise = new Promise((resolve) => {
+      const s = document.createElement("script");
+      s.src = "https://unpkg.com/skinview3d@3.4.1/bundles/skinview3d.bundle.js";
+      s.onload = () => resolve(true);
+      s.onerror = () => resolve(false);
+      document.head.appendChild(s);
+    });
+  return skinLibPromise;
+}
+
+const MAX_3D_SKINS = 12; // browsers cap live WebGL contexts
+
+function skinBox(player, idx) {
+  const box = document.createElement("div");
+  box.className = "skin-box";
+  const fallback = document.createElement("div");
+  fallback.className = "skin-fallback";
+  fallback.textContent = (player.label[0] || "?").toUpperCase();
+  box.appendChild(fallback);
+
+  const flat = () => {
+    const img = document.createElement("img");
+    img.src = `https://mc-heads.net/body/${player.uuid}/120`;
+    img.alt = "";
+    img.onload = () => { fallback.remove(); };
+    img.onerror = () => img.remove();
+    box.appendChild(img);
+  };
+
+  if (idx >= MAX_3D_SKINS) { flat(); return box; }
+  loadSkinLib().then((ok) => {
+    if (!ok || !window.skinview3d) { flat(); return; }
+    try {
+      const canvas = document.createElement("canvas");
+      const viewer = new skinview3d.SkinViewer({
+        canvas, width: 120, height: 160,
+        skin: `https://crafatar.com/skins/${player.uuid}`,
+      });
+      viewer.autoRotate = true;
+      viewer.zoom = 0.9;
+      viewer.loadSkin(`https://crafatar.com/skins/${player.uuid}`).then(
+        () => { fallback.remove(); box.appendChild(canvas); },
+        () => { viewer.dispose(); flat(); });
+    } catch { flat(); }
+  });
+  return box;
+}
+
+function openServerView(s) {
+  if (dirty && !confirm("Discard unsaved changes?")) return;
+  file = null;
+  currentServer = s;
+  setDirty(false);
+  closeTagSearch();
+  $("tagsearch").hidden = true;
+  $("filter").hidden = true;
+  $("backup").disabled = true;
+  $("restore").disabled = true;
+  $("reload").disabled = true;
+  $("filelabel").textContent = s.name;
+  $("filelabel").classList.remove("dim");
+  history.replaceState(null, "", "#server=" + encodeURIComponent(s.name));
+  if (activeRow) { activeRow.classList.remove("active"); activeRow = null; }
+  setStatus(null);
+  renderEditor();
+}
+
+function renderServerView(s) {
+  const wrap = document.createElement("div");
+  wrap.className = "server-view";
+
+  const players = document.createElement("div");
+  players.className = "sv-players";
+  (s.players || []).forEach((p, i) => {
+    const cardEl = document.createElement("div");
+    cardEl.className = "p-card";
+    cardEl.appendChild(skinBox(p, i));
+    const name = document.createElement("div");
+    name.className = "p-name";
+    name.textContent = p.label;
+    cardEl.appendChild(name);
+    cardEl.addEventListener("click", () =>
+      openFile(p.files[0].path, `${s.name} / ${p.label} / ${p.files[0].label}`));
+    players.appendChild(cardEl);
+  });
+  wrap.appendChild(players);
+
+  const files = document.createElement("div");
+  files.className = "sv-files";
+  const title = document.createElement("div");
+  title.className = "card-title";
+  title.textContent = "files";
+  files.appendChild(title);
+  for (const w of s.worlds) {
+    const b = document.createElement("button");
+    b.className = "sv-file";
+    b.textContent = `${w.name} / level.dat`;
+    b.addEventListener("click", () => openFile(w.level, `${s.name} / ${w.name}`));
+    files.appendChild(b);
+    for (const d of w.data) {
+      const db = document.createElement("button");
+      db.className = "sv-file";
+      db.textContent = `${w.name} / ${d.label}`;
+      db.addEventListener("click", () =>
+        openFile(d.path, `${s.name} / ${w.name} / ${d.label}`));
+      files.appendChild(db);
+    }
   }
-  const rot = tpath(r, "Rotation");
-  if (rot && rot.t === "list" && rot.v.length === 2) {
-    pvField(pos.body, "yaw", rot.v[0]);
-    pvField(pos.body, "pitch", rot.v[1]);
-  }
-  pvField(pos.body, "dimension", tpath(r, "Dimension"), null, true);
-  pvField(pos.body, "spawn x", tpath(r, "SpawnX"));
-  pvField(pos.body, "spawn y", tpath(r, "SpawnY"));
-  pvField(pos.body, "spawn z", tpath(r, "SpawnZ"));
-  v.appendChild(pos);
-
-  const ab = pvSection("abilities");
-  pvBool(ab.body, "invulnerable", tpath(r, "abilities.invulnerable"));
-  pvBool(ab.body, "may fly", tpath(r, "abilities.mayfly"));
-  pvBool(ab.body, "flying", tpath(r, "abilities.flying"));
-  pvBool(ab.body, "instabuild", tpath(r, "abilities.instabuild"));
-  pvBool(ab.body, "may build", tpath(r, "abilities.mayBuild"));
-  pvField(ab.body, "walk speed", tpath(r, "abilities.walkSpeed"));
-  pvField(ab.body, "fly speed", tpath(r, "abilities.flySpeed"));
-  v.appendChild(ab);
-
-  v.appendChild(effectsSection());
-  v.appendChild(inventorySection());
-  return v;
+  wrap.appendChild(files);
+  return wrap;
 }
 
 // ------------------------------------------------------ tag path search
-//
-// Global fuzzy find over every scalar tag path in the open file; Enter on a
-// match turns the row into an inline value editor.
 
 function collectPaths() {
   if (file._paths) return file._paths;
@@ -1256,10 +1946,14 @@ function renderEditor() {
   const el = $("editor");
   el.textContent = "";
   if (!file) {
+    if (currentServer) {
+      el.appendChild(renderServerView(currentServer));
+      return;
+    }
     const d = document.createElement("div");
     d.id = "empty";
     d.className = "dim";
-    d.textContent = "Pick a player, world or data file on the left.";
+    d.textContent = "Pick a server, player or file on the left.";
     el.appendChild(d);
     return;
   }
@@ -1290,13 +1984,13 @@ async function openFile(path, label, row) {
   try {
     setStatus("loading…");
     file = await api("/api/file?path=" + encodeURIComponent(path));
+    currentServer = null;
     expanded.clear();
     expanded.add("$");
     viewMode = isPlayerFile(file) ? "player" : "raw";
-    invRootKey = null;
-    invStack = [];
-    invSel = null;
-    invQuery = "";
+    invState.rootKey = null;
+    invState.stack = [];
+    invState.query = "";
     closeTagSearch();
     $("tagsearch").value = "";
     $("tagsearch").hidden = false;
@@ -1307,11 +2001,13 @@ async function openFile(path, label, row) {
     history.replaceState(null, "", "#path=" + encodeURIComponent(path));
     $("filter").hidden = false;
     $("reload").disabled = false;
+    $("backup").disabled = false;
+    $("restore").disabled = false;
+    $("restoremenu").hidden = true;
     if (activeRow) activeRow.classList.remove("active");
-    if (!row) {
-      row = $("tree").querySelector(`[data-path="${CSS.escape(path)}"]`) || undefined;
-    }
+    if (!row) row = $("tree").querySelector(`[data-path="${CSS.escape(path)}"]`) || undefined;
     if (row) { row.classList.add("active"); activeRow = row; }
+    loadEffectIds();
     renderEditor();
   } catch (e) {
     setStatus("open failed: " + e.message, "err");
@@ -1342,12 +2038,68 @@ async function reloadFile() {
   await openFile(path, label, activeRow);
 }
 
+async function backupFile() {
+  if (!file) return;
+  try {
+    const r = await api("/api/backup?path=" + encodeURIComponent(file.path), { method: "POST" });
+    setStatus("backed up as " + r.name, "ok");
+  } catch (e) {
+    setStatus("backup failed: " + e.message, "err");
+  }
+}
+
+async function toggleRestoreMenu() {
+  const menu = $("restoremenu");
+  if (!menu.hidden) { menu.hidden = true; return; }
+  if (!file) return;
+  try {
+    const r = await api("/api/backups?path=" + encodeURIComponent(file.path));
+    menu.textContent = "";
+    if (!r.backups.length) {
+      const d = document.createElement("div");
+      d.className = "tag-path";
+      d.style.padding = "6px 10px";
+      d.textContent = "no backups yet";
+      menu.appendChild(d);
+    }
+    for (const bkp of r.backups) {
+      const row = document.createElement("div");
+      row.className = "tag-row";
+      const name = document.createElement("span");
+      name.className = "tag-path";
+      name.textContent = bkp.name;
+      row.appendChild(name);
+      const size = document.createElement("span");
+      size.className = "tag-val";
+      size.textContent = Math.max(1, Math.round(bkp.size / 1024)) + " KB";
+      row.appendChild(size);
+      row.addEventListener("click", async () => {
+        menu.hidden = true;
+        if (!confirm(`Restore ${bkp.name}? The current state is backed up first.`)) return;
+        try {
+          await api("/api/restore?path=" + encodeURIComponent(file.path) +
+                    "&name=" + encodeURIComponent(bkp.name), { method: "POST" });
+          setDirty(false);
+          await openFile(file.path, $("filelabel").textContent, activeRow);
+          setStatus("restored " + bkp.name, "ok");
+        } catch (e) { setStatus("restore failed: " + e.message, "err"); }
+      });
+      menu.appendChild(row);
+    }
+    menu.hidden = false;
+  } catch (e) {
+    setStatus("could not list backups: " + e.message, "err");
+  }
+}
+
 // ---------------------------------------------------------------- init
 
 $("search").addEventListener("input", renderSidebar);
 $("filter").addEventListener("input", renderEditor);
 $("save").addEventListener("click", saveFile);
 $("reload").addEventListener("click", reloadFile);
+$("backup").addEventListener("click", backupFile);
+$("restore").addEventListener("click", toggleRestoreMenu);
 
 $("tagsearch").addEventListener("input", onTagSearchInput);
 $("tagsearch").addEventListener("keydown", (ev) => {
@@ -1358,6 +2110,7 @@ $("tagsearch").addEventListener("keydown", (ev) => {
 });
 document.addEventListener("click", (ev) => {
   if (!ev.target.closest("#tagresults") && ev.target !== $("tagsearch")) closeTagSearch();
+  if (!ev.target.closest("#restoremenu") && ev.target !== $("restore")) $("restoremenu").hidden = true;
 });
 
 document.addEventListener("keydown", (ev) => {
@@ -1377,9 +2130,13 @@ window.addEventListener("beforeunload", (ev) => {
     setStatus(null);
     for (const s of tree.servers) sbOpen.add(s.name);
     renderSidebar();
-    // deep link: #path=<relative path> opens that file directly
-    const m = location.hash.match(/^#path=(.+)$/);
-    if (m) await openFile(decodeURIComponent(m[1]));
+    const mp = location.hash.match(/^#path=(.+)$/);
+    const ms = location.hash.match(/^#server=(.+)$/);
+    if (mp) await openFile(decodeURIComponent(mp[1]));
+    else if (ms) {
+      const s = tree.servers.find((x) => x.name === decodeURIComponent(ms[1]));
+      if (s) openServerView(s);
+    }
   } catch (e) {
     setStatus("failed to load server tree: " + e.message, "err");
   }

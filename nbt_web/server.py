@@ -144,7 +144,10 @@ def discover_tree() -> dict:
                 if f.suffix == ".dat_old":
                     label += " (old)"
                 if any(x["label"] == label for x in ent["files"]):
-                    label = f"{label}/{f.name}"
+                    n = 2
+                    while any(x["label"] == f"{label} {n}" for x in ent["files"]):
+                        n += 1
+                    label = f"{label} {n}"
                 ent["files"].append({"label": label, "path": _rel(f)})
             ent["files"][1:] = sorted(ent["files"][1:], key=lambda x: x["label"])
 
@@ -165,6 +168,19 @@ def discover_tree() -> dict:
                 "players": sorted(players.values(), key=lambda p: p["label"].lower()),
                 "worlds": worlds,
             })
+
+    # Most recently active server first — a running/recently booted server
+    # keeps its level.dat fresh.
+    def recency(s):
+        m = 0.0
+        for w in s["worlds"]:
+            try:
+                m = max(m, (ROOT / w["level"]).stat().st_mtime)
+            except OSError:
+                pass
+        return m
+
+    servers.sort(key=recency, reverse=True)
     return {"root": str(ROOT), "servers": servers}
 
 
@@ -209,12 +225,13 @@ def get_tree() -> dict:
 
 def _prewarm():
     _rebuild_tree()
-    try:
-        for sd in ROOT.iterdir():
-            if sd.is_dir() and not sd.name.startswith("."):
-                _icon_index(sd)
-    except OSError:
-        pass
+    with _tree_lock:
+        data = _tree_cache["data"]
+    # icon indexes warm in tree order = most recently active server first
+    for s in (data or {}).get("servers", []):
+        sd = ROOT / s["name"]
+        if sd.is_dir():
+            _icon_index(sd)
 
 
 # ---------------------------------------------------------- NBT <-> JSON
@@ -349,6 +366,67 @@ def write_nbt(rel: str, payload: dict) -> dict:
     return {"ok": True, "backup": p.name + ".nbtweb.bak"}
 
 
+# ---------------------------------------------------------------- backups
+#
+# Named on-demand backups (separate from the rolling .nbtweb.bak the save
+# path keeps): stored under <root>/.nbtweb-backups/<relpath>/<timestamp>.
+# The dot-dir keeps them out of discovery. Restoring first snapshots the
+# current state as a "-pre" backup so a restore is always reversible.
+
+BACKUP_DIR = ".nbtweb-backups"
+BAK_NAME_RE = re.compile(r"^[0-9]{8}-[0-9]{6}(-pre)?\.[A-Za-z_]+$")
+
+
+def make_backup(rel: str, pre: bool = False) -> dict:
+    p = _safe_path(rel)
+    if not p.is_file():
+        raise ApiError(404, "no such file")
+    d = ROOT / BACKUP_DIR / rel
+    d.mkdir(parents=True, exist_ok=True)
+    name = time.strftime("%Y%m%d-%H%M%S") + ("-pre" if pre else "") + p.suffix
+    shutil.copy2(p, d / name)
+    return {"ok": True, "name": name}
+
+
+def list_backups(rel: str) -> dict:
+    _safe_path(rel)
+    d = ROOT / BACKUP_DIR / rel
+    out = []
+    if d.is_dir():
+        for f in d.iterdir():
+            if f.is_file() and BAK_NAME_RE.match(f.name):
+                st = f.stat()
+                out.append({"name": f.name, "mtime": int(st.st_mtime), "size": st.st_size})
+    out.sort(key=lambda b: b["name"], reverse=True)
+    return {"backups": out}
+
+
+def restore_backup(rel: str, name: str) -> dict:
+    p = _safe_path(rel)
+    if not p.is_file():
+        raise ApiError(404, "no such file")
+    if not BAK_NAME_RE.match(name):
+        raise ApiError(400, "bad backup name")
+    src = ROOT / BACKUP_DIR / rel / name
+    if not src.is_file():
+        raise ApiError(404, "no such backup")
+    with _write_lock:
+        make_backup(rel, pre=True)
+        fd, tmp = tempfile.mkstemp(prefix=f".{p.name}.", dir=str(p.parent))
+        os.close(fd)
+        try:
+            shutil.copy2(src, tmp)
+            shutil.copymode(p, tmp)
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    return {"ok": True, "restored": name}
+
+
 # ------------------------------------------------------------------ icons
 #
 # Item icons come straight out of the server's own mod jars, so modded items
@@ -359,7 +437,7 @@ _icon_cache = {}   # server dir -> (mods mtime, {item id: (jar path, entry)})
 _icon_lock = threading.Lock()
 
 ITEM_ID_RE = re.compile(r"^[a-z0-9_.\-]+:[a-z0-9_/.\-]+$")
-TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(item|items|block|blocks)/(.+)\.png$")
+TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(item|items|block|blocks|mob_effect)/(.+)\.png$")
 
 
 def _icon_index(server_dir: Path) -> dict:
@@ -373,7 +451,7 @@ def _icon_index(server_dir: Path) -> dict:
         cached = _icon_cache.get(key)
         if cached and cached[0] == mtime:
             return cached[1]
-    items, blocks = {}, {}
+    items, blocks, effects, base = {}, {}, {}, {}
     jars = sorted(mods.glob("*.jar")) if mods.is_dir() else []
     for jar in jars:
         try:
@@ -382,25 +460,41 @@ def _icon_index(server_dir: Path) -> dict:
                     m = TEXTURE_RE.match(n)
                     if not m:
                         continue
-                    mid = f"{m.group(1)}:{m.group(3)}"
-                    (items if m.group(2).startswith("item") else blocks)[mid] = (str(jar), n)
+                    ns, kind, path = m.groups()
+                    hit = (str(jar), n)
+                    if kind == "mob_effect":
+                        effects[f"{ns}:{path}"] = hit
+                        continue
+                    (items if kind.startswith("item") else blocks)[f"{ns}:{path}"] = hit
+                    # mods often nest item textures in subdirs while the item
+                    # id only carries the basename — keep a fallback key
+                    base.setdefault(f"{ns}:{path.rsplit('/', 1)[-1]}", hit)
         except (OSError, zipfile.BadZipFile):
             continue
-    index = {**blocks, **items}  # an item texture beats a block texture
+    index = {"item": items, "block": blocks, "effect": effects, "base": base}
     with _icon_lock:
         _icon_cache[key] = (mtime, index)
     return index
 
 
-def read_icon(server: str, item_id: str) -> bytes:
+def _server_dir(server: str) -> Path:
     if not server or "/" in server or server.startswith("."):
         raise ApiError(400, "bad server name")
     sd = ROOT / server
     if not sd.is_dir():
         raise ApiError(404, "no such server")
+    return sd
+
+
+def read_icon(server: str, item_id: str, kind: str) -> bytes:
+    sd = _server_dir(server)
     if not ITEM_ID_RE.match(item_id):
         raise ApiError(400, "bad item id")
-    hit = _icon_index(sd).get(item_id)
+    idx = _icon_index(sd)
+    if kind == "effect":
+        hit = idx["effect"].get(item_id)
+    else:
+        hit = idx["item"].get(item_id) or idx["block"].get(item_id) or idx["base"].get(item_id)
     if not hit:
         raise ApiError(404, "no icon")
     jar, entry = hit
@@ -409,6 +503,11 @@ def read_icon(server: str, item_id: str) -> bytes:
             return z.read(entry)
     except (OSError, zipfile.BadZipFile, KeyError):
         raise ApiError(404, "icon unreadable")
+
+
+def list_effects(server: str) -> dict:
+    """Effect ids known to this server's mods (from mob_effect textures)."""
+    return {"effects": sorted(_icon_index(_server_dir(server))["effect"].keys())}
 
 
 # ------------------------------------------------------------------ server
@@ -444,9 +543,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, read_nbt(rel))
             if url.path == "/api/icon":
                 q = parse_qs(url.query)
-                png = read_icon(q.get("server", [""])[0], q.get("id", [""])[0])
+                png = read_icon(q.get("server", [""])[0], q.get("id", [""])[0],
+                                q.get("kind", ["item"])[0])
                 return self._send(200, png, "image/png", cache="max-age=86400")
+            if url.path == "/api/effects":
+                q = parse_qs(url.query)
+                return self._json(200, list_effects(q.get("server", [""])[0]))
+            if url.path == "/api/backups":
+                q = parse_qs(url.query)
+                return self._json(200, list_backups(q.get("path", [""])[0]))
             return self._static(url.path)
+        except ApiError as e:
+            return self._json(e.status, {"error": str(e)})
+        except Exception as e:
+            return self._json(500, {"error": f"internal error: {e}"})
+
+    def do_POST(self):
+        url = urlparse(self.path)
+        q = parse_qs(url.query)
+        try:
+            if url.path == "/api/backup":
+                return self._json(200, make_backup(q.get("path", [""])[0]))
+            if url.path == "/api/restore":
+                return self._json(200, restore_backup(q.get("path", [""])[0],
+                                                      q.get("name", [""])[0]))
+            raise ApiError(404, "unknown endpoint")
         except ApiError as e:
             return self._json(e.status, {"error": str(e)})
         except Exception as e:
