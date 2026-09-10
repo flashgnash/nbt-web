@@ -1711,21 +1711,20 @@ function effectsCard() {
 
     const rowEl = document.createElement("div");
     rowEl.className = "fx-row";
-    const ampNode = eff.v[K.amp], durNode = eff.v[K.dur];
-    if (ampNode) {
-      const l = document.createElement("span");
-      l.className = "pv-label";
-      l.textContent = "amplifier";
-      rowEl.appendChild(l);
-      rowEl.appendChild(boundInput(ampNode, "count"));
-    }
-    if (durNode) {
-      const l = document.createElement("span");
-      l.className = "pv-label";
-      l.textContent = "duration";
-      rowEl.appendChild(l);
-      rowEl.appendChild(boundInput(durNode, "num"));
-    }
+    // amplifier (a.k.a. potency) and duration are omitted from the NBT when
+    // they're 0 — materialise a default so the box always shows and is editable.
+    const ampNode = eff.v[K.amp] || (eff.v[K.amp] = { t: "byte", v: 0 });
+    const durNode = eff.v[K.dur] || (eff.v[K.dur] = { t: "int", v: 0 });
+    const ampL = document.createElement("span");
+    ampL.className = "pv-label";
+    ampL.textContent = "amplifier";
+    rowEl.appendChild(ampL);
+    rowEl.appendChild(boundInput(ampNode, "count"));
+    const durL = document.createElement("span");
+    durL.className = "pv-label";
+    durL.textContent = "duration";
+    rowEl.appendChild(durL);
+    rowEl.appendChild(boundInput(durNode, "num"));
     ec.appendChild(rowEl);
     wrap.appendChild(ec);
   });
@@ -1758,15 +1757,15 @@ function renderPlayerView() {
   const side = document.createElement("div");
   side.className = "pv-side";
 
-  main.appendChild(abilitiesCard());
-  main.appendChild(experienceCard());
-  main.appendChild(effectsCard());
   main.appendChild(itemsCard());
+  main.appendChild(effectsCard());
 
   side.appendChild(positionCard());
   const sp = spawnCard();
   if (sp) side.appendChild(sp);
+  side.appendChild(experienceCard());
   side.appendChild(vitalsCard());
+  side.appendChild(abilitiesCard());
 
   layout.appendChild(main);
   layout.appendChild(side);
