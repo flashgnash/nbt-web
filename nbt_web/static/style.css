@@ -217,7 +217,7 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   border-radius: 5px;
   color: var(--text);
   font: inherit;
-  padding: 3px 28px 3px 8px;
+  padding: 6px 28px 6px 8px;
   outline: none;
 }
 
