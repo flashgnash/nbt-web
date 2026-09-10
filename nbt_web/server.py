@@ -18,6 +18,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,12 +32,16 @@ STATIC: Path = Path(os.environ.get("NBT_WEB_STATIC", Path(__file__).parent / "st
 
 NBT_EXTS = {".dat", ".dat_old", ".nbt"}
 
-# Directories never worth descending into when hunting for worlds — huge
-# and NBT-free (mod jars, logs, packwiz caches, plugin jars, ...).
+# Directories never worth descending into — either NBT-free or huge
+# (mod jars, logs, packwiz caches, and above all the region/entity/poi
+# dirs, which hold tens of thousands of .mca files and no .dat).
 PRUNE = {
-    ".git", ".cache", "backups", "bundler", "cache", "config", "crash-reports",
-    "defaultconfigs", "kubejs", "libraries", "logs", "mods", "node_modules",
-    "packwiz", "plugins", "resourcepacks", "scripts", "shaderpacks", "versions",
+    ".git", ".cache", "advancements", "backups", "bluemap", "bundler", "cache",
+    "config", "crash-reports", "datapacks", "defaultconfigs", "dynmap",
+    "entities", "generated", "journeymap", "kubejs", "libraries", "logs",
+    "mods", "node_modules", "packwiz", "plugins", "poi", "region",
+    "resourcepacks", "scripts", "shaderpacks", "stats", "structures",
+    "versions",
 }
 
 _write_lock = threading.Lock()
@@ -84,22 +89,23 @@ def _walk_dats(server_dir: Path, max_depth: int = 6):
     """Every .dat/.dat_old under the server dir (pruned, symlink-safe)."""
     out = []
 
-    def walk(d: Path, depth: int):
+    def walk(d, depth: int):
         if depth > max_depth:
             return
         try:
-            children = sorted(d.iterdir())
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.is_dir(follow_symlinks=False):
+                        if e.name in PRUNE or e.name.startswith("."):
+                            continue
+                        walk(e.path, depth + 1)
+                    elif e.name.endswith((".dat", ".dat_old")):
+                        out.append(Path(e.path))
         except OSError:
             return
-        for c in children:
-            if c.is_dir():
-                if c.is_symlink() or c.name in PRUNE or c.name.startswith("."):
-                    continue
-                walk(c, depth + 1)
-            elif c.suffix in (".dat", ".dat_old"):
-                out.append(c)
 
     walk(server_dir, 0)
+    out.sort()
     return out
 
 
@@ -160,6 +166,55 @@ def discover_tree() -> dict:
                 "worlds": worlds,
             })
     return {"root": str(ROOT), "servers": servers}
+
+
+# The tree walk touches a lot of disk on a busy hosting box, so requests are
+# served from an in-memory cache: the first build happens at startup (and
+# blocks only the unlucky first request if it beats the warm-up), afterwards
+# a stale cache answers instantly while a background thread refreshes it.
+
+TREE_TTL = 30.0
+_tree_cache = {"data": None, "ts": 0.0, "building": False}
+_tree_lock = threading.Lock()
+
+
+def _rebuild_tree():
+    try:
+        data = discover_tree()
+    except Exception:
+        data = None
+    with _tree_lock:
+        if data is not None:
+            _tree_cache["data"] = data
+            _tree_cache["ts"] = time.time()
+        _tree_cache["building"] = False
+
+
+def get_tree() -> dict:
+    with _tree_lock:
+        cached = _tree_cache["data"]
+        stale = time.time() - _tree_cache["ts"] > TREE_TTL
+        if cached is not None:
+            if stale and not _tree_cache["building"]:
+                _tree_cache["building"] = True
+                threading.Thread(target=_rebuild_tree, daemon=True).start()
+            return cached
+    # no cache yet (request beat the startup warm-up): build synchronously
+    data = discover_tree()
+    with _tree_lock:
+        _tree_cache["data"] = data
+        _tree_cache["ts"] = time.time()
+    return data
+
+
+def _prewarm():
+    _rebuild_tree()
+    try:
+        for sd in ROOT.iterdir():
+            if sd.is_dir() and not sd.name.startswith("."):
+                _icon_index(sd)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------- NBT <-> JSON
@@ -383,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         try:
             if url.path == "/api/tree":
-                return self._json(200, discover_tree())
+                return self._json(200, get_tree())
             if url.path == "/api/file":
                 rel = parse_qs(url.query).get("path", [""])[0]
                 return self._json(200, read_nbt(rel))
@@ -431,6 +486,9 @@ def main():
     ROOT = Path(args.root)
     if not ROOT.is_dir():
         sys.exit(f"root directory does not exist: {ROOT}")
+    with _tree_lock:
+        _tree_cache["building"] = True
+    threading.Thread(target=_prewarm, daemon=True).start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"nbt-web serving {ROOT} on http://{args.host}:{args.port}", flush=True)
     srv.serve_forever()

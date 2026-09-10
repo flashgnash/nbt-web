@@ -1372,7 +1372,9 @@ window.addEventListener("beforeunload", (ev) => {
 
 (async () => {
   try {
+    setStatus("loading server tree…");
     tree = await api("/api/tree");
+    setStatus(null);
     for (const s of tree.servers) sbOpen.add(s.name);
     renderSidebar();
     // deep link: #path=<relative path> opens that file directly
