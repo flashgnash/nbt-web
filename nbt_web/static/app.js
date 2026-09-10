@@ -783,19 +783,53 @@ const ACC = {
   },
 };
 
+// a slot/handler's own name, used to label an inventory nicely (curios
+// Identifier = "head"/"ring"/…, an accessory type name, etc.)
+const NAME_KEYS = ["Identifier", "Name", "name", "Type", "type"];
+// generic wrapper segments worth hiding from a label — these are container
+// plumbing, not information (curios/accessories/forge cap boilerplate).
+const NOISE_SEG = new Set([
+  "neoforge:attachments", "ForgeCaps", "cardinal_components", "Curios",
+  "StacksHandler", "Stacks", "Items", "Inventory", "inventory", "Contents",
+  "contents", "items", "Handler", "handler", "inventory_holder", "ItemStacks",
+]);
+
+function nameOf(comp) {
+  if (comp && comp.t === "compound")
+    for (const k of NAME_KEYS) {
+      const v = comp.v[k];
+      if (v && v.t === "string" && v.v) return v.v;
+    }
+  return null;
+}
+
+function cleanLabel(parts) {
+  const kept = parts.filter((p) => !NOISE_SEG.has(p) && !/^#\d+$/.test(p));
+  return (kept.length ? kept : parts).join(" / ") || "items";
+}
+
+// Walk the whole file for item lists. Crucially this descends INTO non-item
+// lists too — modded inventories nest the real item list inside handler lists
+// (curios: Curios[i].StacksHandler.Stacks.Items) — while stopping at a genuine
+// item list so a container's own items (e.g. a backpack's contents) aren't
+// re-surfaced as separate top-level inventories.
 function findItemLists(node) {
   const out = [];
-  (function walk(n, path, depth) {
-    if (!n || depth > 16) return;   // modded inventories nest deep (NeoForge attachments, caps)
+  (function walk(n, path, parts, depth) {
+    if (!n || depth > 20 || out.length >= 100) return;
     if (n.t === "list") {
-      if (isDirectItemList(n)) out.push({ path, node: n, style: "direct" });
-      else if (isWrappedItemList(n)) out.push({ path, node: n, style: "wrapped" });
+      if (isDirectItemList(n)) { out.push({ path, label: cleanLabel(parts), node: n, style: "direct" }); return; }
+      if (isWrappedItemList(n)) { out.push({ path, label: cleanLabel(parts), node: n, style: "wrapped" }); return; }
+      n.v.forEach((c, i) => {                       // descend into handler/holder lists
+        if (c && c.t === "compound")
+          walk(c, `${path}[${i}]`, parts.concat(nameOf(c) || `#${i}`), depth + 1);
+      });
       return;
     }
     if (n.t === "compound")
       for (const k of Object.keys(n.v))
-        walk(n.v[k], path ? path + "." + k : k, depth + 1);
-  })(node, "", 0);
+        walk(n.v[k], path ? path + "." + k : k, parts.concat(k), depth + 1);
+  })(node, "", [], 0);
   return out;
 }
 
@@ -813,7 +847,7 @@ function discoverInventories() {
   if (end && end.t === "list") push("EnderItems", "ender chest", end, "direct");
   for (const f of findItemLists(file.root))
     if (f.path !== "Inventory" && f.path !== "EnderItems")
-      push(f.path, f.path.split(".").join(" / "), f.node, f.style);
+      push(f.path, f.label, f.node, f.style);
   return out;
 }
 
