@@ -737,9 +737,28 @@ document.addEventListener("keydown", (ev) => {
 // (shulker component containers, backpack Items lists, …) with a crumb
 // trail. State {rootKey, stack, query} is per-host.
 
+// a resource location like "minecraft:diamond" or "matteroverdrive:android_battery"
+const RES_LOC = /^[a-z0-9_.\-]+:[a-z0-9_./\-]+$/i;
+// keys that mark an id-bearing compound as a stored ITEM rather than something
+// else that also carries an id (mob effects → amplifier/duration; attributes →
+// base; attribute modifiers → amount/operation; block entities → …). A stack
+// count, slot, or item payload. Deliberately NOT "amount" (that's an attribute
+// modifier's field — item stack size is always count/Count).
+const ITEM_MARK_KEYS = ["count", "Count", "Slot", "slot",
+                        "components", "tag", "Damage", "damage"];
+
+function itemIdOf(n) {
+  if (!n || n.t !== "compound" || !n.v) return null;
+  const id = n.v.id;
+  return (id && id.t === "string" && RES_LOC.test(id.v)) ? id.v : null;
+}
+
+// Mod- and version-agnostic: anything with a resource-location id plus an
+// item-ish marker is treated as a stored item, so modded inventories
+// (curios/baubles/aether, matter-overdrive android parts, …) surface without
+// per-mod knowledge. (An empty container has no items to recognise — unknowable.)
 function isItemCompound(n) {
-  return n && n.t === "compound" && n.v.id && n.v.id.t === "string" &&
-    (n.v.Slot || n.v.count || n.v.Count);
+  return itemIdOf(n) != null && ITEM_MARK_KEYS.some((k) => k in n.v);
 }
 
 function isDirectItemList(n) {
@@ -750,7 +769,7 @@ function isDirectItemList(n) {
 function isWrappedItemList(n) {
   return n && n.t === "list" && n.v.length > 0 &&
     n.v.every((e) => e.t === "compound") &&
-    n.v.some((e) => isItemCompound(e.v.item));
+    n.v.some((e) => e.v && isItemCompound(e.v.item));
 }
 
 const ACC = {
@@ -767,7 +786,7 @@ const ACC = {
 function findItemLists(node) {
   const out = [];
   (function walk(n, path, depth) {
-    if (!n || depth > 8) return;
+    if (!n || depth > 16) return;   // modded inventories nest deep (NeoForge attachments, caps)
     if (n.t === "list") {
       if (isDirectItemList(n)) out.push({ path, node: n, style: "direct" });
       else if (isWrappedItemList(n)) out.push({ path, node: n, style: "wrapped" });
