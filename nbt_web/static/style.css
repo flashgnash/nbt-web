@@ -268,17 +268,36 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 
 /* -------------------------------------------------------- player view */
 
-/* Two-up pane grid. Inventory (.card.full) spans both columns on top; the
-   remaining panes fall into left|right pairs. Below the split width the grid
-   drops to a single column and the panes interleave in DOM order. */
+/* Inventory-left, panes-right flow. The Inventory (.pv-inv) sits on the left
+   capped at a max-width so it stops hogging the whole row; its slot grid stays
+   dynamic (.inv-row wraps by width). The side panes (.pv-side) flow into the
+   freed space to the RIGHT, self-balancing 1–2 up. When the row can't hold
+   both, .pv-side wraps below the inventory; on narrow/mobile widths everything
+   stacks in one column. */
 .pv-layout {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 14px;
-  align-items: stretch;
+  align-items: flex-start;
+}
+/* Cap width to roughly the natural 9-wide inventory + armor column so the box
+   hugs its content; below that the slot rows wrap dynamically to fewer columns. */
+.pv-inv {
+  flex: 1 1 520px;
+  max-width: 760px;
+  min-width: 0;
+}
+.pv-side {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px;
+  align-content: start;
 }
 @media (max-width: 760px) {
-  .pv-layout { grid-template-columns: minmax(0, 1fr); }
+  .pv-inv { flex-basis: 100%; max-width: none; }
+  .pv-side { flex-basis: 100%; }
 }
 .card {
   background: var(--panel);

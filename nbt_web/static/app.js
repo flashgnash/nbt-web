@@ -2821,29 +2821,34 @@ function itemsCard() {
 }
 
 function renderPlayerView() {
-  // One responsive grid (see .pv-layout): Inventory spans the full width on
-  // top, then the remaining panes pair up 2-up on wide screens and collapse
-  // to a single interleaved column when narrow. DOM order below IS the
-  // narrow-column order, and also lays out the wide pairs row by row:
-  //   Inventory (full)
-  //   Position       | Spawnpoint
-  //   Potion Effects | Experience
-  //   Vitals         | Abilities
-  // (Spawnpoint and Experience are deliberately swapped out of their old
-  // sidebar positions so these pairs line up.)
+  // Two-column flow (see .pv-layout / .pv-inv / .pv-side in style.css):
+  // the Inventory sits on the LEFT capped at a max-width — its slot grid stays
+  // dynamic (.inv-row wraps by available width, no fixed column count) — while
+  // the remaining panes flow into .pv-side to the RIGHT, self-balancing 1–2 up
+  // via an auto-fit grid. When the row can't hold both, .pv-side wraps BELOW
+  // the inventory, and on narrow/mobile widths everything stacks in one column.
+  // DOM order below is the reading order.
   const layout = document.createElement("div");
   layout.className = "pv-layout";
-  // Panes that carried the old .pv-side form tweaks keep them via .pv-pane.
-  const pane = (c) => { if (c) c.classList.add("pv-pane"); return c; };
 
-  layout.appendChild(itemsCard());        // Inventory — full width, top
-  layout.appendChild(pane(positionCard()));
-  const sp = spawnCard();
-  if (sp) layout.appendChild(pane(sp));    // Spawnpoint
-  layout.appendChild(effectsCard());      // Potion Effects
-  layout.appendChild(pane(experienceCard()));
-  layout.appendChild(pane(vitalsCard()));
-  layout.appendChild(pane(abilitiesCard()));
+  const inv = itemsCard();                 // Inventory — left column, max-width
+  inv.classList.add("pv-inv");
+  layout.appendChild(inv);
+
+  // Side panes flow to the right of the inventory. Panes that carried the old
+  // .pv-side form tweaks keep them via .pv-pane; Potion Effects doesn't need it.
+  const side = document.createElement("div");
+  side.className = "pv-side";
+  const pane = (c) => { if (c) { c.classList.add("pv-pane"); side.appendChild(c); } };
+  const plain = (c) => { if (c) side.appendChild(c); };
+
+  pane(positionCard());
+  pane(spawnCard());                        // Spawnpoint (may be null)
+  plain(effectsCard());                     // Potion Effects
+  pane(experienceCard());
+  pane(vitalsCard());
+  pane(abilitiesCard());
+  layout.appendChild(side);
   return layout;
 }
 
