@@ -3047,6 +3047,13 @@ function renderServerView(s) {
     name.className = "p-name";
     name.textContent = p.label;
     cardEl.appendChild(name);
+    if (p.mtime) {
+      const seen = document.createElement("div");
+      seen.className = "p-lastseen";
+      seen.textContent = relTimeAgo(p.mtime);
+      seen.title = new Date(p.mtime * 1000).toLocaleString();
+      cardEl.appendChild(seen);
+    }
     cardEl.addEventListener("click", () =>
       openFile(p.files[0].path, `${s.name} / ${p.label} / ${p.files[0].label}`));
     players.appendChild(cardEl);

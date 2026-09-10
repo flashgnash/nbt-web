@@ -629,6 +629,7 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   font-size: 48px;
 }
 .p-name { color: var(--text); font-weight: bold; text-align: center; overflow-wrap: anywhere; }
+.p-lastseen { color: var(--dim); font-size: 11px; text-align: center; }
 
 /* servers landing — cards reuse .p-card; columns balanced by balancedGrid() */
 .sv-servers { display: grid; gap: 14px; }
