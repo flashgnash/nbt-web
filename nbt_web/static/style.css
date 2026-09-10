@@ -96,7 +96,9 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 }
 #topbar .spacer { flex: 1; }
 #sidebar-toggle { display: flex; align-items: center; }
-#sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
+@media (min-width: 721px) {
+  #sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
+}
 #filelabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #filter { width: 180px; flex: 0 1 auto; }
 #tagsearch { width: 260px; flex: 0 1 auto; }
