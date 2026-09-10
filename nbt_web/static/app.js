@@ -475,6 +475,50 @@ const VANILLA_ITEMS = [
   "zombified_piglin_spawn_egg",
 ].map((n) => "minecraft:" + n);
 
+// Vanilla max-durability values (1.21.4, from PrismarineJS/minecraft-data).
+// Only items with maxDurability > 0 are listed. Used to bound the durability
+// slider for vanilla items that carry no minecraft:max_damage component in NBT.
+const VANILLA_MAX_DAMAGE = {
+  "minecraft:wooden_sword": 59,    "minecraft:wooden_shovel": 59,
+  "minecraft:wooden_pickaxe": 59,  "minecraft:wooden_axe": 59,
+  "minecraft:wooden_hoe": 59,
+  "minecraft:stone_sword": 131,    "minecraft:stone_shovel": 131,
+  "minecraft:stone_pickaxe": 131,  "minecraft:stone_axe": 131,
+  "minecraft:stone_hoe": 131,
+  "minecraft:iron_sword": 250,     "minecraft:iron_shovel": 250,
+  "minecraft:iron_pickaxe": 250,   "minecraft:iron_axe": 250,
+  "minecraft:iron_hoe": 250,
+  "minecraft:golden_sword": 32,    "minecraft:golden_shovel": 32,
+  "minecraft:golden_pickaxe": 32,  "minecraft:golden_axe": 32,
+  "minecraft:golden_hoe": 32,
+  "minecraft:diamond_sword": 1561, "minecraft:diamond_shovel": 1561,
+  "minecraft:diamond_pickaxe": 1561, "minecraft:diamond_axe": 1561,
+  "minecraft:diamond_hoe": 1561,
+  "minecraft:netherite_sword": 2031, "minecraft:netherite_shovel": 2031,
+  "minecraft:netherite_pickaxe": 2031, "minecraft:netherite_axe": 2031,
+  "minecraft:netherite_hoe": 2031,
+  "minecraft:leather_helmet": 55,  "minecraft:leather_chestplate": 80,
+  "minecraft:leather_leggings": 75, "minecraft:leather_boots": 65,
+  "minecraft:chainmail_helmet": 165, "minecraft:chainmail_chestplate": 240,
+  "minecraft:chainmail_leggings": 225, "minecraft:chainmail_boots": 195,
+  "minecraft:iron_helmet": 165,    "minecraft:iron_chestplate": 240,
+  "minecraft:iron_leggings": 225,  "minecraft:iron_boots": 195,
+  "minecraft:golden_helmet": 77,   "minecraft:golden_chestplate": 112,
+  "minecraft:golden_leggings": 105, "minecraft:golden_boots": 91,
+  "minecraft:diamond_helmet": 363, "minecraft:diamond_chestplate": 528,
+  "minecraft:diamond_leggings": 495, "minecraft:diamond_boots": 429,
+  "minecraft:netherite_helmet": 407, "minecraft:netherite_chestplate": 592,
+  "minecraft:netherite_leggings": 555, "minecraft:netherite_boots": 481,
+  "minecraft:turtle_helmet": 275,
+  "minecraft:bow": 384,            "minecraft:crossbow": 326,
+  "minecraft:trident": 250,        "minecraft:fishing_rod": 64,
+  "minecraft:shears": 238,         "minecraft:flint_and_steel": 64,
+  "minecraft:carrot_on_a_stick": 25, "minecraft:warped_fungus_on_a_stick": 25,
+  "minecraft:elytra": 432,         "minecraft:shield": 336,
+  "minecraft:brush": 64,           "minecraft:mace": 500,
+  "minecraft:wolf_armor": 64,
+};
+
 function setStatus(msg, cls) {
   const el = $("status");
   if (!msg) { el.hidden = true; return; }
@@ -1548,14 +1592,22 @@ function typeBadge(node) {
 }
 
 // DURABILITY: property-based via the modern damage components. A slider shows
-// when max_damage is present (the max is a real property, never guessed).
-function durabilityInfo(comp) {
-  if (!comp) return null;
-  const maxNode = comp["minecraft:max_damage"];
-  if (!isScalar(maxNode)) return null;
-  const max = Number(maxNode.v);
-  if (!(max > 0)) return null;
-  return { max, comp, maxNode, dmgNode: comp["minecraft:damage"] || null };
+// when max_damage is present (the max is a real property, never guessed), OR
+// when the item id is a known vanilla item with durability (synthetic mode).
+function durabilityInfo(comp, id, itemV) {
+  if (comp) {
+    const maxNode = comp["minecraft:max_damage"];
+    if (isScalar(maxNode)) {
+      const max = Number(maxNode.v);
+      if (max > 0) return { max, comp, maxNode, dmgNode: comp["minecraft:damage"] || null };
+    }
+  }
+  if (!id) return null;
+  const synthMax = VANILLA_MAX_DAMAGE[id];
+  if (!(synthMax > 0)) return null;
+  return { max: synthMax, comp: comp || null, maxNode: null,
+           dmgNode: (comp && comp["minecraft:damage"]) || null,
+           synthetic: true, itemV: itemV || null };
 }
 
 // ENERGY: standard Forge/NeoForge energy. Detect by a scalar key named "energy"
@@ -1587,6 +1639,17 @@ function durabilityRow(body, dur) {
   const upd = (rem) => { readout.textContent = Math.round(rem) + " / " + dur.max; };
   const sl = miniSlider(0, dur.max, dur.max - curDmg(), 1, (rem) => {
     const dmg = Math.max(0, Math.min(dur.max, Math.round(dur.max - rem)));
+    if (dur.synthetic) {
+      // Bootstrap the components compound if the item had none, then insert
+      // minecraft:max_damage so subsequent reads see the real node.
+      if (!dur.comp) {
+        dur.comp = {};
+        if (dur.itemV) dur.itemV.components = { t: "compound", v: dur.comp };
+      }
+      if (!dur.comp["minecraft:max_damage"]) {
+        dur.comp["minecraft:max_damage"] = { t: "int", v: dur.max };
+      }
+    }
     if (!dur.dmgNode) { dur.dmgNode = { t: "int", v: 0 }; dur.comp["minecraft:damage"] = dur.dmgNode; }
     dur.dmgNode.v = dmg;
     upd(rem);
@@ -1689,7 +1752,8 @@ function renderItemAllTags(body, item) {
   const rows = document.createElement("div");
   sec.appendChild(rows);
 
-  const dur = durabilityInfo(comp);
+  const itemId = item.v.id ? item.v.id.v : null;
+  const dur = durabilityInfo(comp, itemId, item.v);
   if (dur) { mark(dur.maxNode); mark(dur.dmgNode); durabilityRow(rows, dur); }
   const en = energyInfo(item, comp, tag);
   if (en) { mark(en.node); mark(en.maxNode); energyRow(rows, en); }
