@@ -577,8 +577,22 @@ def _icon_index(server_dir: Path) -> dict:
                     base.setdefault(f"{ns}:{path.rsplit('/', 1)[-1]}", hit)
         except (OSError, zipfile.BadZipFile):
             continue
+    # Last-ditch texture guess: map every path segment from all known textures
+    # to the first hit that carries it.  Catches GeckoLib/Relics items whose
+    # textures live outside textures/item/ (e.g. abilities/<name>/).
+    _GENERIC_SEGMENTS = frozenset({
+        "item", "items", "block", "blocks", "mob_effect", "textures",
+        "abilities", "entity", "wearable", "gui", "description", "icons",
+        "overlay", "base", "normal", "default",
+    })
+    guess: dict = {}
+    for rl, hit in textures.items():
+        _, _, tpath = rl.partition(":")
+        for part in tpath.split("/"):
+            if part and part not in _GENERIC_SEGMENTS and len(part) >= 4:
+                guess.setdefault(part, hit)
     index = {"item": items, "block": blocks, "effect": effects, "base": base,
-             "models": models, "textures": textures}
+             "models": models, "textures": textures, "guess": guess}
     with _icon_lock:
         _icon_cache[key] = (mtime, index)
     return index
@@ -602,6 +616,13 @@ def read_icon(server: str, item_id: str, kind: str) -> bytes:
         hit = idx["effect"].get(item_id)
     else:
         hit = idx["item"].get(item_id) or idx["block"].get(item_id) or idx["base"].get(item_id)
+        if not hit:
+            # Last-ditch heuristic: find any texture whose path contains the
+            # item basename as a segment (e.g. GeckoLib items whose textures
+            # live under abilities/<name>/ instead of textures/item/).
+            _, _, ipath = item_id.partition(":")
+            basename = ipath.rsplit("/", 1)[-1]
+            hit = idx["guess"].get(basename)
     if not hit:
         raise ApiError(404, "no icon")
     jar, entry = hit
@@ -712,6 +733,31 @@ def resolve_item_model(server: str, item_id: str) -> dict:
                 for k, v in (vt.get("textures") or {}).items():
                     textures.setdefault(k, v)
             break                                    # template / unknown parent
+        # Overrides-only model (no parent/textures/elements/loader, just
+        # overrides[]): follow the first override target and continue resolution.
+        if (not model.get("parent") and not model.get("textures")
+                and not model.get("elements") and not model.get("loader")
+                and model.get("overrides")):
+            target = model["overrides"][0].get("model")
+            if target and target not in seen:
+                seen.add(target)
+                ref = target
+                continue
+            break
+        # neoforge:separate_transforms: the GUI representation lives in base.parent;
+        # descend there instead of stopping at the loader boundary.
+        if (model.get("loader") == "neoforge:separate_transforms"
+                and isinstance(model.get("base"), dict)):
+            base_sub = model["base"]
+            for k, v in (base_sub.get("textures") or {}).items():
+                textures.setdefault(k, v)
+            base_parent = base_sub.get("parent")
+            if base_parent and base_parent not in seen:
+                seen.add(base_parent)
+                ref = base_parent
+                continue
+            custom = True
+            break
         if "loader" in model:
             custom = True
         if model.get("elements"):

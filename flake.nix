@@ -40,7 +40,7 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = [ (pkgs.python3.withPackages (ps: [ ps.nbtlib ])) ];
+          packages = [ (pkgs.python3.withPackages (ps: [ ps.nbtlib ps.pytest ])) ];
         };
       });
     };

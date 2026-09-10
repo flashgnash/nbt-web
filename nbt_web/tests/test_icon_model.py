@@ -77,5 +77,56 @@ def main() -> int:
     return 1 if failures else 0
 
 
+import pytest
+
+_SKIP_NO_FIXTURE = pytest.mark.skipif(
+    not (ROOT / SERVER / "mods").is_dir(),
+    reason=f"no mods fixture at {ROOT / SERVER}/mods",
+)
+
+
+def _setup():
+    server.ROOT = ROOT
+
+
+@_SKIP_NO_FIXTURE
+def test_umbrella_separate_transforms_flat():
+    """artifacts:umbrella — overrides-only + neoforge:separate_transforms → flat."""
+    _setup()
+    doc = server.resolve_item_model(SERVER, "artifacts:umbrella")
+    assert doc["kind"] == "flat", f"expected flat, got {doc['kind']}"
+    layer0 = doc["textures"].get("layer0")
+    assert layer0 == "artifacts:item/umbrella_gui", f"unexpected layer0: {layer0}"
+    png = server.read_texture(SERVER, layer0)
+    assert png[:4] == b"\x89PNG", "layer0 texture is not a valid PNG"
+
+
+@_SKIP_NO_FIXTURE
+def test_promise_tier1_two_layers():
+    """evilcraft:promise_tier_1 — two-layer flat model exposes layer0 + layer1."""
+    _setup()
+    doc = server.resolve_item_model(SERVER, "evilcraft:promise_tier_1")
+    assert doc["kind"] == "flat", f"expected flat, got {doc['kind']}"
+    assert "layer0" in doc["textures"], "missing layer0"
+    assert "layer1" in doc["textures"], "missing layer1 (two-layer flat)"
+    for k in ("layer0", "layer1"):
+        png = server.read_texture(SERVER, doc["textures"][k])
+        assert png[:4] == b"\x89PNG", f"{k} texture is not a valid PNG"
+
+
+@_SKIP_NO_FIXTURE
+def test_night_vision_goggles_texture_guess():
+    """reliquified_artifacts:night_vision_goggles — no item model, but texture-guess
+    fallback finds a PNG under abilities/night_vision_goggles/."""
+    _setup()
+    doc = server.resolve_item_model(SERVER, "reliquified_artifacts:night_vision_goggles")
+    assert doc["kind"] == "unresolved", (
+        f"expected unresolved (no model in jar), got {doc['kind']}"
+    )
+    # The icon endpoint must still serve something via the guess fallback.
+    png = server.read_icon(SERVER, "reliquified_artifacts:night_vision_goggles", "")
+    assert png[:4] == b"\x89PNG", "guess fallback did not return a valid PNG"
+
+
 if __name__ == "__main__":
     sys.exit(main())

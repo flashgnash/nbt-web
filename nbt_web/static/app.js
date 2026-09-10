@@ -1039,7 +1039,35 @@ function attachIcon(box, id, kind) {
   resolveModel(id).then((doc) => {
     const urls = [];
     if (doc && doc.textures) {
-      if (doc.kind === "flat" && doc.textures.layer0) urls.push(texUrl(doc.textures.layer0));
+      if (doc.kind === "flat") {
+        // Collect layer0, layer1, … in order.
+        const layers = [];
+        for (let n = 0; ; n++) {
+          const rl = doc.textures[`layer${n}`];
+          if (!rl) break;
+          layers.push(rl);
+        }
+        if (layers.length > 1) {
+          // Multi-layer flat: composite layers stacked (layer0 bottom → layerN top).
+          // Per-tier colour tint (ItemColor) is compiled Java → unrecoverable from data.
+          img.remove();
+          const wrap = document.createElement("span");
+          wrap.style.cssText = "position:relative;display:inline-block;width:100%;height:100%";
+          layers.forEach((rl, i) => {
+            const lay = document.createElement("img");
+            lay.alt = "";
+            lay.draggable = false;
+            lay.style.cssText = `position:absolute;inset:0;width:100%;height:100%;z-index:${i}`;
+            lay.src = texUrl(rl);
+            wrap.appendChild(lay);
+          });
+          box.appendChild(wrap);
+          box.classList.add("has-icon");
+          return;
+        } else if (layers.length === 1) {
+          urls.push(texUrl(layers[0]));
+        }
+      }
       const rep = doc.particle || doc.textures.layer0 || Object.values(doc.textures)[0];
       if (rep) urls.push(texUrl(rep));
     }
