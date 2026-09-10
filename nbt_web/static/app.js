@@ -626,9 +626,9 @@ function numRow(body, label, node, cls) {
   return ctls;
 }
 
-function switchRow(body, label, node) {
-  if (!node) return;
-  const ctls = frow(body, label);
+// bare toggle bound to a byte-boolean node (0/1); shared by switchRow and the
+// generic item-tag renderer.
+function makeSwitch(node) {
   const sw = document.createElement("div");
   sw.className = "sw" + (node.v ? " on" : "");
   const knob = document.createElement("div");
@@ -639,7 +639,12 @@ function switchRow(body, label, node) {
     sw.classList.toggle("on", !!node.v);
     setDirty(true);
   });
-  ctls.appendChild(sw);
+  return sw;
+}
+
+function switchRow(body, label, node) {
+  if (!node) return;
+  frow(body, label).appendChild(makeSwitch(node));
 }
 
 // house mini slider: inset track, accent-dark fill, round accent handle
@@ -1072,6 +1077,181 @@ function moveSlot(srcPane, srcSlot, dstPane, dstSlot) {
   return true;
 }
 
+// ---- generic item-tag editor (every nbt tag / data-component on an item,
+// with a control derived from the tag TYPE — no per-item special-casing)
+
+function compV(item) { const c = item.v.components; return c && c.t === "compound" ? c.v : null; }
+function tagV(item)  { const t = item.v.tag;        return t && t.t === "compound" ? t.v : null; }
+
+// NBT has no boolean type; booleans are byte 0/1. Treat those as toggles, every
+// other numeric (incl. bytes outside 0/1) as a number box.
+function isBoolNode(node) { return node.t === "byte" && (node.v === 0 || node.v === 1); }
+function isScalar(node)   { return node && !CONTAINERS.has(node.t); }
+
+function typeBadge(node) {
+  const b = document.createElement("span");
+  b.className = "nbt-type";
+  b.textContent = typeLabel(node);
+  return b;
+}
+
+// DURABILITY: property-based via the modern damage components. A slider shows
+// when max_damage is present (the max is a real property, never guessed).
+function durabilityInfo(comp) {
+  if (!comp) return null;
+  const maxNode = comp["minecraft:max_damage"];
+  if (!isScalar(maxNode)) return null;
+  const max = Number(maxNode.v);
+  if (!(max > 0)) return null;
+  return { max, comp, maxNode, dmgNode: comp["minecraft:damage"] || null };
+}
+
+// ENERGY: standard Forge/NeoForge energy. Detect by a scalar key named "energy"
+// (namespace-stripped, case-insensitive) sitting beside a capacity key. A slider
+// needs a real max, so it shows only when a capacity property is discoverable;
+// otherwise the energy value falls through to the generic number box.
+function energyInfo(item, comp, tag) {
+  const bare = (k) => (k.includes(":") ? k.slice(k.indexOf(":") + 1) : k);
+  for (const scope of [item.v, comp, tag].filter(Boolean)) {
+    let node = null;
+    for (const k of Object.keys(scope))
+      if (/^energy$/i.test(bare(k)) && isScalar(scope[k])) { node = scope[k]; break; }
+    if (!node) continue;
+    let maxNode = null;
+    for (const k of Object.keys(scope))
+      if (/^(max_?energy|energy_?capacity|capacity)$/i.test(bare(k)) && isScalar(scope[k])) {
+        maxNode = scope[k]; break;
+      }
+    if (maxNode && Number(maxNode.v) > 0) return { node, maxNode };
+  }
+  return null;
+}
+
+function durabilityRow(body, dur) {
+  const ctls = frow(body, "durability");
+  const readout = document.createElement("span");
+  readout.className = "pv-label msl-pct";
+  const curDmg = () => (dur.dmgNode ? Number(dur.dmgNode.v) : 0);
+  const upd = (rem) => { readout.textContent = Math.round(rem) + " / " + dur.max; };
+  const sl = miniSlider(0, dur.max, dur.max - curDmg(), 1, (rem) => {
+    const dmg = Math.max(0, Math.min(dur.max, Math.round(dur.max - rem)));
+    if (!dur.dmgNode) { dur.dmgNode = { t: "int", v: 0 }; dur.comp["minecraft:damage"] = dur.dmgNode; }
+    dur.dmgNode.v = dmg;
+    upd(rem);
+    setDirty(true);
+  });
+  upd(dur.max - curDmg());
+  ctls.appendChild(sl.el);
+  ctls.appendChild(readout);
+}
+
+function energyRow(body, en) {
+  const ctls = frow(body, "energy");
+  const max = Number(en.maxNode.v);
+  const box = boundInput(en.node, "num");
+  const readout = document.createElement("span");
+  readout.className = "pv-label msl-pct";
+  readout.textContent = "/ " + max;
+  const sl = miniSlider(0, max, Number(en.node.v), 1, (v) => {
+    en.node.v = validateScalar(en.node.t, String(Math.round(v)));
+    box.value = en.node.v;
+    setDirty(true);
+  });
+  box.addEventListener("input", () => { const n = Number(box.value); if (isFinite(n)) sl.set(n); });
+  ctls.appendChild(sl.el);
+  ctls.appendChild(box);
+  ctls.appendChild(readout);
+}
+
+// one editable field, control chosen from the tag type; containers expand into
+// a nested tree (lazily built) so list/compound keep working without regressing
+// the raw-nbt tab.
+function renderItemField(body, key, node, consumed) {
+  if (!node || consumed.has(node)) return;
+  const ctls = frow(body, String(key));
+  const row = ctls.parentElement;
+  const lbl = row.querySelector(".flabel");
+  if (lbl) lbl.title = String(key);
+
+  if (CONTAINERS.has(node.t)) {
+    const kids = document.createElement("div");
+    kids.className = "nbt-children";
+    kids.style.display = "none";
+    const caret = document.createElement("button");
+    caret.className = "mini-btn";
+    caret.textContent = "▸";
+    let open = false, built = false;
+    caret.addEventListener("click", () => {
+      open = !open;
+      caret.textContent = open ? "▾" : "▸";
+      kids.style.display = open ? "" : "none";
+      if (open && !built) { built = true; buildItemChildren(kids, node, consumed); }
+    });
+    ctls.appendChild(caret);
+    ctls.appendChild(typeBadge(node));
+    const n = node.t === "compound" ? Object.keys(node.v).length : node.v.length;
+    const cnt = document.createElement("span");
+    cnt.className = "nbt-count";
+    cnt.textContent = n + (n === 1 ? " entry" : " entries");
+    ctls.appendChild(cnt);
+    row.after(kids);
+  } else if (isBoolNode(node)) {
+    ctls.appendChild(makeSwitch(node));
+    ctls.appendChild(typeBadge(node));
+  } else {
+    ctls.appendChild(boundInput(node, node.t === "string" ? "wide" : "num"));
+    ctls.appendChild(typeBadge(node));
+  }
+}
+
+function buildItemChildren(wrap, node, consumed) {
+  if (node.t === "compound") {
+    for (const k of Object.keys(node.v)) renderItemField(wrap, k, node.v[k], consumed);
+  } else if (node.t === "list") {
+    node.v.forEach((c, i) => renderItemField(wrap, i, c, consumed));
+  } else {
+    const et = node.t === "byteArray" ? "byte" : node.t === "intArray" ? "int" : "long";
+    node.v.forEach((_, i) => renderItemField(wrap, i,
+      { t: et, get v() { return node.v[i]; }, set v(x) { node.v[i] = x; } }, consumed));
+  }
+}
+
+// Renders every remaining tag/component on the item (those without a dedicated
+// control above) plus the durability/energy sliders when applicable.
+function renderItemAllTags(body, item) {
+  if (!item || !item.v) return;
+  const consumed = new Set();
+  const mark = (n) => { if (n) consumed.add(n); };
+  mark(item.v.id); mark(item.v.count); mark(item.v.Count);
+  mark(item.v.Slot); mark(item.v.slot);
+  const comp = compV(item), tag = tagV(item);
+  if (comp && comp["minecraft:enchantments"]) mark(comp["minecraft:enchantments"]);
+  if (tag && tag.Enchantments) mark(tag.Enchantments);
+
+  const sec = document.createElement("div");
+  sec.className = "im-ench";
+  const title = document.createElement("div");
+  title.className = "card-title";
+  title.textContent = "nbt / components";
+  sec.appendChild(title);
+  const rows = document.createElement("div");
+  sec.appendChild(rows);
+
+  const dur = durabilityInfo(comp);
+  if (dur) { mark(dur.maxNode); mark(dur.dmgNode); durabilityRow(rows, dur); }
+  const en = energyInfo(item, comp, tag);
+  if (en) { mark(en.node); mark(en.maxNode); energyRow(rows, en); }
+
+  for (const k of Object.keys(item.v)) {
+    if (k === "tag" || k === "components") continue;   // flattened below
+    renderItemField(rows, k, item.v[k], consumed);
+  }
+  if (comp) for (const k of Object.keys(comp)) renderItemField(rows, k, comp[k], consumed);
+  if (tag)  for (const k of Object.keys(tag))  renderItemField(rows, k, tag[k], consumed);
+
+  if (rows.childElementCount > 0) body.appendChild(sec);
+}
+
 // ---- item modal
 
 function openItemModal(pane, slot, rerender) {
@@ -1155,6 +1335,9 @@ function openItemModal(pane, slot, rerender) {
   };
   renderEnch();
   b.appendChild(enchWrap);
+
+  // every remaining nbt tag / data-component, typed control per field
+  renderItemAllTags(b, item);
 
   // footer
   const foot = document.createElement("div");
