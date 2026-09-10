@@ -4,7 +4,10 @@
   --panel: #263238;
   --inset: #11181c;
   --hover: #314048;
-  --border: #3a4a52;
+  /* flat look: panes are told apart by surface shade, not borders. Kept as a
+     token (not removed) so accent/critical borders still work; the neutral
+     hairline is simply transparent. */
+  --border: transparent;
   --text: #ffffff;
   --dim: rgba(255, 255, 255, 0.55);
   --accent: #9dff00;
@@ -37,8 +40,7 @@ body { display: flex; }
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--panel);
 }
 
 #searchwrap { padding: 12px; border-bottom: 1px solid var(--border); }
@@ -90,7 +92,7 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+  background: var(--panel);
 }
 #topbar .spacer { flex: 1; }
 #filelabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -99,20 +101,20 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 .dirty { color: var(--modified); font-size: 13px; }
 
 .btn {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--hover);
+  border: none;
   border-radius: 5px;
   color: var(--text);
   font: inherit;
-  padding: 5px 14px;
+  padding: 6px 14px;
   cursor: pointer;
-  transition: background 80ms, border-color 80ms;
+  transition: filter 80ms, background 80ms;
   white-space: nowrap;
 }
-.btn:hover:not(:disabled) { background: var(--hover); }
+.btn:hover:not(:disabled) { filter: brightness(1.25); }
 .btn:disabled { opacity: 0.4; cursor: default; }
-.btn.primary { border-color: var(--accent); color: var(--accent); }
-.btn.danger:hover:not(:disabled) { border-color: var(--critical); color: var(--critical); }
+.btn.primary { color: var(--accent); }
+.btn.danger:hover:not(:disabled) { color: var(--critical); }
 
 #status {
   padding: 6px 12px;
