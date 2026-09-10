@@ -34,13 +34,20 @@ what needs eyes-on verification, and what's still open.
 ## Needs verification (couldn't test from here)
 
 - **Folia playerdata.** `/api/tree` showed `folia-treecapitator` with
-  `players: []` and `world.data: []`. The fix lists `<world>/playerdata/*.dat`
-  via a targeted glob, which also dodges the whole-tree walk aborting early on
-  an unreadable sibling. **Open question:** confirm the Folia server actually
-  stores playerdata at `folia-treecapitator/world/playerdata/`. If it lives
-  elsewhere (or nowhere yet), the new `playerdata` node will still be empty and
-  discovery needs to point at the real path. A quick `ls` of that dir on the
-  box will settle it.
+  `players: []` and `world.data: []`, yet the server definitely has players.
+  Root cause (high confidence): a **symlinked `playerdata` directory**. The old
+  whole-tree walk used `is_dir(follow_symlinks=False)`, so it stepped over the
+  symlink and never saw the files — which is why both players AND the player
+  cards were empty. Two fixes now in place:
+  - discovery lists `<world>/playerdata/*.dat` via `pathlib.glob` (follows
+    symlinks) → raw files show as a `playerdata` tree node;
+  - `_walk_dats` now follows directory symlinks (realpath visited-set guards
+    loops; PRUNE + max_depth bound it) → the per-player abstraction + boot
+    cache pick them up too, so player **cards** should appear.
+  **Verify:** pull the branch, restart the server, open `folia-treecapitator` —
+  players should now be listed. If they're still missing, playerdata lives
+  somewhere non-standard (not `<world>/playerdata`) and we need one concrete
+  path to target.
 - All UI changes were syntax-checked only (python `ast` + `node --check`); they
   have **not** been exercised in a browser. Worth a visual pass on: the effect
   combo dropdown styling/keyboard, the balanced card grid at a few widths, and

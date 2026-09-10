@@ -87,17 +87,33 @@ def _rel(p: Path) -> str:
 
 
 def _walk_dats(server_dir: Path, max_depth: int = 6):
-    """Every .dat/.dat_old under the server dir (pruned, symlink-safe)."""
+    """Every .dat/.dat_old under the server dir (pruned, symlink-following).
+
+    Directory symlinks ARE followed — hosting setups routinely symlink
+    ``playerdata`` (and whole worlds) to a shared store, and skipping them made
+    those files invisible. A realpath visited-set stops symlink loops, PRUNE +
+    ``max_depth`` keep the walk bounded.
+    """
     out = []
+    seen = set()
 
     def walk(d, depth: int):
         if depth > max_depth:
             return
         try:
+            real = os.path.realpath(d)
+        except OSError:
+            return
+        if real in seen:
+            return
+        seen.add(real)
+        try:
             with os.scandir(d) as it:
                 for e in it:
-                    if e.is_dir(follow_symlinks=False):
-                        if e.name in PRUNE or e.name.startswith("."):
+                    if e.name.startswith("."):
+                        continue
+                    if e.is_dir(follow_symlinks=True):
+                        if e.name in PRUNE:
                             continue
                         walk(e.path, depth + 1)
                     elif e.name.endswith((".dat", ".dat_old")):
