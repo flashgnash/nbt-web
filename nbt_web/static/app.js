@@ -2986,21 +2986,129 @@ function onTagSearchInput() {
   renderTagResults();
 }
 
+// ------------------------------------------------------- servers landing
+
+// Status has no live source (we don't ping), so it's fetched from
+// /api/servers/status and refreshed by a 30s poll that runs ONLY while this
+// pane is on screen — renderEditor() stops the poll on every other view.
+let serversStatus = {};        // name -> { online, players, maxPlayers, lastActive }
+let serversPollTimer = null;
+
+function stopServersPoll() {
+  if (serversPollTimer) { clearInterval(serversPollTimer); serversPollTimer = null; }
+}
+
+function relTimeAgo(epoch) {
+  if (!epoch) return "unknown";
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - epoch);
+  for (const [secs, name] of [[86400, "day"], [3600, "hour"], [60, "minute"]]) {
+    if (s >= secs) { const n = Math.floor(s / secs); return `${n} ${name}${n === 1 ? "" : "s"} ago`; }
+  }
+  return "just now";
+}
+
+function serverStatusPill(st) {
+  const pill = document.createElement("span");
+  const online = !!(st && st.online);
+  pill.className = "s-status " + (online ? "online" : "offline");
+  pill.textContent = online ? "online" : "offline";
+  return pill;
+}
+
+async function refreshServersStatus(cards) {
+  let list;
+  try { list = await api("/api/servers/status"); }
+  catch { return; }   // keep the last-known state on a failed poll
+  serversStatus = {};
+  for (const st of list) serversStatus[st.name] = st;
+  for (const c of cards) c.update(serversStatus[c.name]);
+}
+
+// The default pane: a card per server (reusing the .p-card look + balancedGrid).
+function renderServersLanding() {
+  const grid = document.createElement("div");
+  grid.className = "sv-servers";
+  const cards = [];
+  for (const s of tree.servers) {
+    const card = document.createElement("div");
+    card.className = "p-card";
+
+    // server-icon.png, falling back to an initial-letter tile (mirrors skinBox).
+    const iconWrap = document.createElement("div");
+    iconWrap.className = "skin-box s-icon";
+    const fallback = document.createElement("div");
+    fallback.className = "skin-fallback";
+    fallback.textContent = (s.name[0] || "?").toUpperCase();
+    iconWrap.appendChild(fallback);
+    const img = document.createElement("img");
+    img.src = "/api/server-icon?server=" + encodeURIComponent(s.name);
+    img.alt = "";
+    img.onload = () => { fallback.remove(); };
+    img.onerror = () => img.remove();
+    iconWrap.appendChild(img);
+    card.appendChild(iconWrap);
+
+    const name = document.createElement("div");
+    name.className = "p-name";
+    name.textContent = s.name;
+    card.appendChild(name);
+
+    const meta = document.createElement("div");
+    meta.className = "s-meta";
+    card.appendChild(meta);
+
+    const count = document.createElement("div");
+    count.className = "s-players";
+    card.appendChild(count);
+
+    const footer = document.createElement("div");
+    footer.className = "s-footer";
+    card.appendChild(footer);
+
+    const update = (st) => {
+      meta.textContent = "";
+      meta.appendChild(serverStatusPill(st));
+      const n = st ? st.players : 0;
+      count.textContent = `${n} player${n === 1 ? "" : "s"}`;
+      if (st && !st.online && st.lastActive) {
+        footer.textContent = "last booted " + relTimeAgo(st.lastActive);
+        footer.hidden = false;
+      } else {
+        footer.textContent = "";
+        footer.hidden = true;
+      }
+    };
+    update(serversStatus[s.name]);   // paint from any cached status at once
+
+    card.addEventListener("click", () => openServerView(s));
+    grid.appendChild(card);
+    cards.push({ name: s.name, update });
+  }
+
+  balancedGrid(grid, 176);
+
+  stopServersPoll();
+  refreshServersStatus(cards);
+  serversPollTimer = setInterval(() => {
+    if (!document.body.contains(grid)) { stopServersPoll(); return; }
+    refreshServersStatus(cards);
+  }, 30000);
+
+  return grid;
+}
+
 // --------------------------------------------------------------- editor
 
 function renderEditor() {
   const el = $("editor");
   el.textContent = "";
+  stopServersPoll();
   if (!file) {
     if (currentServer) {
       el.appendChild(renderServerView(currentServer));
       return;
     }
-    const d = document.createElement("div");
-    d.id = "empty";
-    d.className = "dim";
-    d.textContent = "Pick a server, player or file on the left.";
-    el.appendChild(d);
+    el.appendChild(renderServersLanding());
     return;
   }
   const ctx = playerCtx(file.path);

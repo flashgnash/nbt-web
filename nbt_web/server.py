@@ -606,6 +606,70 @@ def list_items(server: str) -> dict:
     return {"items": sorted(set(idx["item"]) | set(idx["block"]))}
 
 
+# ------------------------------------------------------------ server status
+
+# We have no live ping, so "online" is inferred from logs/latest.log: a running
+# server appends to it constantly (chunk saves, keepalive, player events), so a
+# fresh mtime is a good proxy. Idle-but-up servers still tick often enough to
+# stay inside this window; the same mtime doubles as "last active".
+ONLINE_WINDOW = 300.0  # seconds
+
+
+def _max_players(server_dir: Path):
+    """max-players from server.properties, or None when absent/unreadable."""
+    try:
+        for line in (server_dir / "server.properties").read_text().splitlines():
+            line = line.strip()
+            if line.startswith("max-players"):
+                return int(line.partition("=")[2].strip())
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def server_status() -> list:
+    """Per-server landing status for every discovered server dir.
+
+    Mirrors the server_dirs discovery in discover_tree(); player counts reuse
+    the known-players list already computed for /api/tree (playerdata), not a
+    live head-count we don't have.
+    """
+    try:
+        server_dirs = sorted(d for d in ROOT.iterdir()
+                             if d.is_dir() and not d.name.startswith("."))
+    except OSError:
+        server_dirs = []
+    counts = {s["name"]: len(s.get("players", [])) for s in get_tree()["servers"]}
+    now = time.time()
+    out = []
+    for sd in server_dirs:
+        last_active = None
+        online = False
+        try:
+            mtime = (sd / "logs" / "latest.log").stat().st_mtime
+            last_active = int(mtime)
+            online = (now - mtime) < ONLINE_WINDOW
+        except OSError:
+            pass
+        out.append({
+            "name": sd.name,
+            "online": online,
+            "players": counts.get(sd.name, 0),
+            "maxPlayers": _max_players(sd),
+            "lastActive": last_active,
+        })
+    return out
+
+
+def read_server_icon(server: str) -> bytes:
+    """The server's server-icon.png (MC standard 64x64), or 404 if absent."""
+    sd = _server_dir(server)
+    try:
+        return (sd / "server-icon.png").read_bytes()
+    except OSError:
+        raise ApiError(404, "no icon")
+
+
 # ------------------------------------------------------------------ server
 
 MIME = {".html": "text/html", ".js": "text/javascript", ".css": "text/css",
@@ -676,6 +740,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/api/tree":
                 return self._json(200, get_tree())
+            if url.path == "/api/servers/status":
+                return self._json(200, server_status())
+            if url.path == "/api/server-icon":
+                q = parse_qs(url.query)
+                png = read_server_icon(q.get("server", [""])[0])
+                return self._send(200, png, "image/png", cache="max-age=300")
             if url.path == "/api/file":
                 rel = parse_qs(url.query).get("path", [""])[0]
                 return self._json(200, read_nbt(rel))
