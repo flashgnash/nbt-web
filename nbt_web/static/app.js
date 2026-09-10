@@ -513,7 +513,7 @@ const VANILLA_MAX_DAMAGE = {
   "minecraft:bow": 384,            "minecraft:crossbow": 326,
   "minecraft:trident": 250,        "minecraft:fishing_rod": 64,
   "minecraft:shears": 238,         "minecraft:flint_and_steel": 64,
-  "minecraft:carrot_on_a_stick": 25, "minecraft:warped_fungus_on_a_stick": 25,
+  "minecraft:carrot_on_a_stick": 25, "minecraft:warped_fungus_on_a_stick": 100,
   "minecraft:elytra": 432,         "minecraft:shield": 336,
   "minecraft:brush": 64,           "minecraft:mace": 500,
   "minecraft:wolf_armor": 64,
