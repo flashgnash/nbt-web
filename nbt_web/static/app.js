@@ -1000,7 +1000,7 @@ function attachIcon(box, id, kind) {
       if (rep) urls.push(texUrl(rep));
     }
     urls.push(iconUrl, ...cdn);
-    play(urls);
+    play([...new Set(urls)]);
   });
 }
 
@@ -3107,7 +3107,8 @@ function renderServersLanding() {
       meta.textContent = "";
       meta.appendChild(serverStatusPill(st));
       const n = st ? st.players : 0;
-      count.textContent = `${n} player${n === 1 ? "" : "s"}`;
+      const mx = st && st.maxPlayers != null ? st.maxPlayers : null;
+      count.textContent = mx != null ? `${n} players · ${mx} max` : `${n} player${n === 1 ? "" : "s"}`;
       if (st && !st.online && st.lastActive) {
         footer.textContent = "last booted " + relTimeAgo(st.lastActive);
         footer.hidden = false;
@@ -3359,6 +3360,9 @@ window.addEventListener("beforeunload", (ev) => {
     else if (ms) {
       const s = tree.servers.find((x) => x.name === decodeURIComponent(ms[1]));
       if (s) openServerView(s);
+      else renderEditor();
+    } else {
+      renderEditor();
     }
   } catch (e) {
     setStatus("failed to load server tree: " + e.message, "err");

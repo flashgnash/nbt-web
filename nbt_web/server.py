@@ -698,7 +698,7 @@ def resolve_item_model(server: str, item_id: str) -> dict:
     elements = None
     display_gui = None
     custom = flat = has_elements = False
-    seen = set()
+    seen = {ref}
     steps = 0
     while ref and steps < 20:
         steps += 1
@@ -800,6 +800,7 @@ def server_status() -> list:
                              if d.is_dir() and not d.name.startswith("."))
     except OSError:
         server_dirs = []
+    # get_tree() is TTL-cached; this call is cheap on every 30s poll.
     counts = {s["name"]: len(s.get("players", [])) for s in get_tree()["servers"]}
     now = time.time()
     out = []
