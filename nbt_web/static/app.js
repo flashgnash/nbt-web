@@ -2118,7 +2118,7 @@ function openEffectModal() {
 
 function effectsCard() {
   const { list, modern } = effectsList();
-  const c = card("potion effects", true);
+  const c = card("potion effects");
   c.classList.add("fx-card");
   const addBtn = document.createElement("button");
   addBtn.className = "fx-add";
