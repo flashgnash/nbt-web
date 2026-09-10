@@ -207,12 +207,17 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 .add-form input { width: 160px; padding: 2px 8px; }
 .add-form select,
 .pv-select {
-  background: var(--inset);
+  appearance: none;
+  background-color: var(--inset);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath fill='%23ffffff' d='M5 7L0 2h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px;
   border: 1px solid var(--border);
   border-radius: 5px;
   color: var(--text);
   font: inherit;
-  padding: 3px 8px;
+  padding: 6px 28px 6px 8px;
   outline: none;
 }
 
@@ -308,6 +313,8 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
 .pv-input.count { max-width: 64px; flex: 0 0 auto; }
 .pv-input.wide { flex: 1; }
 .pv-input.bad { border-color: var(--critical); }
+.pv-input[type="number"]::-webkit-inner-spin-button,
+.pv-input[type="number"]::-webkit-outer-spin-button { opacity: 1; filter: invert(1); }
 
 /* switch: inset track, accent knob when on */
 .sw {
@@ -686,4 +693,11 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
     z-index: 19;
   }
   #sidebar.open + #sidebar-backdrop { display: block; }
+  .modal,
+  .modal.wide {
+    width: 100dvw;
+    max-width: none;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
 }
