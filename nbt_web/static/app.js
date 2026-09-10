@@ -529,27 +529,65 @@ function shortId(id) {
   return id.startsWith("minecraft:") ? id.slice(10) : id;
 }
 
+// resolved item models, memoised per server+id (many stacks share one id)
+const _modelCache = new Map();
+function resolveModel(id) {
+  const key = fileServer() + "|" + id;
+  let p = _modelCache.get(key);
+  if (!p) {
+    p = fetch(`/api/model?server=${encodeURIComponent(fileServer())}&id=${encodeURIComponent(id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+    _modelCache.set(key, p);
+  }
+  return p;
+}
+
 // icon fallback: server mod jars -> vanilla CDN -> nothing (text stays)
 function attachIcon(box, id, kind) {
   const [ns, name] = id.includes(":") ? id.split(":", 2) : ["minecraft", id];
-  const urls = [`/api/icon?server=${encodeURIComponent(fileServer())}&id=${encodeURIComponent(id)}` +
-                (kind === "effect" ? "&kind=effect" : "")];
-  if (ns === "minecraft") {
-    if (kind === "effect") urls.push(`${VANILLA_CDN}/mob_effect/${name}.png`);
-    else urls.push(`${VANILLA_CDN}/item/${name}.png`, `${VANILLA_CDN}/block/${name}.png`);
-  }
   const img = document.createElement("img");
-  let i = 0;
-  img.onerror = () => {
-    i++;
-    if (i < urls.length) img.src = urls[i];
-    else { img.remove(); box.classList.remove("has-icon"); }
-  };
-  img.onload = () => box.classList.add("has-icon");
-  img.src = urls[0];
   img.alt = "";
   img.draggable = false;
   box.appendChild(img);
+  const play = (urls) => {
+    let i = 0;
+    img.onerror = () => {
+      i++;
+      if (i < urls.length) img.src = urls[i];
+      else { img.remove(); box.classList.remove("has-icon"); }
+    };
+    img.onload = () => box.classList.add("has-icon");
+    if (urls.length) img.src = urls[0];
+    else { img.remove(); box.classList.remove("has-icon"); }
+  };
+
+  const server = encodeURIComponent(fileServer());
+  const iconUrl = `/api/icon?server=${server}&id=${encodeURIComponent(id)}` +
+                  (kind === "effect" ? "&kind=effect" : "");
+  const cdn = [];
+  if (ns === "minecraft") {
+    if (kind === "effect") cdn.push(`${VANILLA_CDN}/mob_effect/${name}.png`);
+    else cdn.push(`${VANILLA_CDN}/item/${name}.png`, `${VANILLA_CDN}/block/${name}.png`);
+  }
+  // Vanilla and effects have no minecraft: model in the jars (effects use a
+  // dedicated index), so keep the existing icon -> CDN chain.
+  if (ns === "minecraft" || kind === "effect") { play([iconUrl, ...cdn]); return; }
+
+  // Modded item: resolve its model so we serve the RIGHT texture (a basename
+  // guess can collide with an unrelated item) and never blank out — a
+  // representative texture (particle / first texture) beats an empty slot.
+  const texUrl = (rl) => `/api/texture?server=${server}&id=${encodeURIComponent(rl)}`;
+  resolveModel(id).then((doc) => {
+    const urls = [];
+    if (doc && doc.textures) {
+      if (doc.kind === "flat" && doc.textures.layer0) urls.push(texUrl(doc.textures.layer0));
+      const rep = doc.particle || doc.textures.layer0 || Object.values(doc.textures)[0];
+      if (rep) urls.push(texUrl(rep));
+    }
+    urls.push(iconUrl, ...cdn);
+    play(urls);
+  });
 }
 
 function iconBox(id, kind, cls) {

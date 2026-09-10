@@ -528,6 +528,12 @@ _icon_lock = threading.Lock()
 
 ITEM_ID_RE = re.compile(r"^[a-z0-9_.\-]+:[a-z0-9_/.\-]+$")
 TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(item|items|block|blocks|mob_effect)/(.+)\.png$")
+# every texture PNG, keyed by resource-location as models reference it
+# (assets/ns/textures/item/foo.png -> "ns:item/foo")
+TEX_ALL_RE = re.compile(r"^assets/([^/]+)/textures/(.+)\.png$")
+# every item/block model JSON, keyed the way a `parent` reference names it
+# (assets/ns/models/item/foo.json -> "ns:item/foo")
+MODEL_RE = re.compile(r"^assets/([^/]+)/models/(item|block)/(.+)\.json$")
 
 
 def _icon_index(server_dir: Path) -> dict:
@@ -542,16 +548,26 @@ def _icon_index(server_dir: Path) -> dict:
         if cached and cached[0] == mtime:
             return cached[1]
     items, blocks, effects, base = {}, {}, {}, {}
+    models, textures = {}, {}
     jars = sorted(mods.glob("*.jar")) if mods.is_dir() else []
     for jar in jars:
         try:
             with zipfile.ZipFile(jar) as z:
                 for n in z.namelist():
+                    hit = (str(jar), n)
+                    mm = MODEL_RE.match(n)
+                    if mm:
+                        ns, mkind, mpath = mm.groups()
+                        models.setdefault(f"{ns}:{mkind}/{mpath}", hit)
+                        continue
+                    ta = TEX_ALL_RE.match(n)
+                    if ta:
+                        tns, tpath = ta.groups()
+                        textures.setdefault(f"{tns}:{tpath}", hit)
                     m = TEXTURE_RE.match(n)
                     if not m:
                         continue
                     ns, kind, path = m.groups()
-                    hit = (str(jar), n)
                     if kind == "mob_effect":
                         effects[f"{ns}:{path}"] = hit
                         continue
@@ -561,7 +577,8 @@ def _icon_index(server_dir: Path) -> dict:
                     base.setdefault(f"{ns}:{path.rsplit('/', 1)[-1]}", hit)
         except (OSError, zipfile.BadZipFile):
             continue
-    index = {"item": items, "block": blocks, "effect": effects, "base": base}
+    index = {"item": items, "block": blocks, "effect": effects, "base": base,
+             "models": models, "textures": textures}
     with _icon_lock:
         _icon_cache[key] = (mtime, index)
     return index
@@ -593,6 +610,150 @@ def read_icon(server: str, item_id: str, kind: str) -> bytes:
             return z.read(entry)
     except (OSError, zipfile.BadZipFile, KeyError):
         raise ApiError(404, "icon unreadable")
+
+
+def read_texture(server: str, res_id: str) -> bytes:
+    """Serve any texture PNG by resource-location (``ns:item/foo``).
+
+    Generalises read_icon: the model resolver names textures this way, so the
+    frontend can fetch whatever layer0/particle the model actually points at
+    instead of guessing a path from the item id.
+    """
+    sd = _server_dir(server)
+    if not ITEM_ID_RE.match(res_id):
+        raise ApiError(400, "bad texture id")
+    hit = _icon_index(sd)["textures"].get(res_id)
+    if not hit:
+        raise ApiError(404, "no texture")
+    jar, entry = hit
+    try:
+        with zipfile.ZipFile(jar) as z:
+            return z.read(entry)
+    except (OSError, zipfile.BadZipFile, KeyError):
+        raise ApiError(404, "texture unreadable")
+
+
+# The ~4-5 vanilla parent templates mod models bottom out on. Server jars ship
+# no minecraft: assets, so we hardcode just enough of each to classify the
+# model (flat vs 3D elements) — deliberately NOT a network/CDN dependency.
+# "flat" -> a layer0 sprite (item/generated & item/handheld); the rest are cube
+# geometry (elements) whose faces come from the child model's own textures.
+_VANILLA_MODELS = {
+    "item/generated": {"flat": True},
+    "item/handheld": {"flat": True},
+    "block/block": {},                       # display transforms only
+    "block/cube": {"elements": True},
+    "block/cube_all": {"elements": True,
+                       "textures": {"particle": "#all", "all": None}},
+}
+
+
+def _load_model(idx: dict, ref: str):
+    hit = idx["models"].get(ref)
+    if not hit:
+        return None
+    jar, entry = hit
+    try:
+        with zipfile.ZipFile(jar) as z:
+            return json.loads(z.read(entry))
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError):
+        return None
+
+
+def _deref(val, textures, depth=0):
+    """Follow ``#foo`` texture indirections to a concrete resource-location."""
+    seen = set()
+    while isinstance(val, str) and val.startswith("#") and depth < 12:
+        if val in seen:
+            return None
+        seen.add(val)
+        val = textures.get(val[1:])
+        depth += 1
+    return val
+
+
+def resolve_item_model(server: str, item_id: str) -> dict:
+    """Resolve an item id to its flattened model.
+
+    Walks ``models/item/<path>.json`` and its ``parent`` chain across jars,
+    resolving the hardcoded vanilla templates at the bottom. Returns::
+
+        {id, kind, textures{name: ns:path}, elements?, display?, particle?}
+
+    kind is one of: ``flat`` (a layer0 sprite the frontend can show directly),
+    ``elements`` (cube geometry — not rendered here, gets a representative
+    texture), ``custom`` (a loader/BER model — unrenderable, representative
+    texture), or ``unresolved`` (no model found; caller falls back).
+    """
+    sd = _server_dir(server)
+    if not ITEM_ID_RE.match(item_id):
+        raise ApiError(400, "bad item id")
+    idx = _icon_index(sd)
+    ns, _, path = item_id.partition(":")
+    ref = f"{ns}:item/{path}"
+    if ref not in idx["models"]:
+        return {"id": item_id, "kind": "unresolved", "textures": {}}
+
+    textures: dict = {}
+    elements = None
+    display_gui = None
+    custom = flat = has_elements = False
+    seen = set()
+    steps = 0
+    while ref and steps < 20:
+        steps += 1
+        norm = ref[10:] if ref.startswith("minecraft:") else ref
+        model = _load_model(idx, ref)
+        if model is None:
+            vt = _VANILLA_MODELS.get(norm)
+            if vt is not None:
+                flat = flat or bool(vt.get("flat"))
+                has_elements = has_elements or bool(vt.get("elements"))
+                for k, v in (vt.get("textures") or {}).items():
+                    textures.setdefault(k, v)
+            break                                    # template / unknown parent
+        if "loader" in model:
+            custom = True
+        if model.get("elements"):
+            has_elements = True
+            if elements is None:
+                elements = model["elements"]
+        disp = model.get("display") or {}
+        if display_gui is None and "gui" in disp:
+            display_gui = disp["gui"]
+        for k, v in (model.get("textures") or {}).items():
+            textures.setdefault(k, v)               # child wins (visited first)
+        parent = model.get("parent")
+        if not parent or parent in seen:
+            break
+        seen.add(parent)
+        ref = parent
+
+    resolved = {}
+    for k, v in textures.items():
+        rv = _deref(v, textures)
+        if isinstance(rv, str) and ITEM_ID_RE.match(rv):
+            resolved[k] = rv
+
+    if custom:
+        kind = "custom"
+    elif "layer0" in resolved and (flat or not has_elements):
+        kind = "flat"
+    elif has_elements:
+        kind = "elements"
+    elif "layer0" in resolved:
+        kind = "flat"
+    else:
+        kind = "custom"
+
+    return {
+        "id": item_id,
+        "kind": kind,
+        "textures": resolved,
+        "elements": elements if kind == "elements" else None,
+        "display": display_gui,
+        "particle": resolved.get("particle"),
+    }
 
 
 def list_effects(server: str) -> dict:
@@ -690,6 +851,16 @@ class Handler(BaseHTTPRequestHandler):
                 png = read_icon(q.get("server", [""])[0], q.get("id", [""])[0],
                                 q.get("kind", ["item"])[0])
                 return self._send(200, png, "image/png", cache="max-age=86400")
+            if url.path == "/api/texture":
+                q = parse_qs(url.query)
+                png = read_texture(q.get("server", [""])[0], q.get("id", [""])[0])
+                return self._send(200, png, "image/png", cache="max-age=86400")
+            if url.path == "/api/model":
+                q = parse_qs(url.query)
+                return self._send(200,
+                    json.dumps(resolve_item_model(q.get("server", [""])[0],
+                                                   q.get("id", [""])[0])).encode(),
+                    cache="max-age=86400")
             if url.path == "/api/effects":
                 q = parse_qs(url.query)
                 return self._json(200, list_effects(q.get("server", [""])[0]))
