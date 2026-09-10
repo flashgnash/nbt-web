@@ -1865,25 +1865,29 @@ function itemsCard() {
 }
 
 function renderPlayerView() {
+  // One responsive grid (see .pv-layout): Inventory spans the full width on
+  // top, then the remaining panes pair up 2-up on wide screens and collapse
+  // to a single interleaved column when narrow. DOM order below IS the
+  // narrow-column order, and also lays out the wide pairs row by row:
+  //   Inventory (full)
+  //   Position       | Spawnpoint
+  //   Potion Effects | Experience
+  //   Vitals         | Abilities
+  // (Spawnpoint and Experience are deliberately swapped out of their old
+  // sidebar positions so these pairs line up.)
   const layout = document.createElement("div");
   layout.className = "pv-layout";
-  const main = document.createElement("div");
-  main.className = "pv-main";
-  const side = document.createElement("div");
-  side.className = "pv-side";
+  // Panes that carried the old .pv-side form tweaks keep them via .pv-pane.
+  const pane = (c) => { if (c) c.classList.add("pv-pane"); return c; };
 
-  main.appendChild(itemsCard());
-  main.appendChild(effectsCard());
-
-  side.appendChild(positionCard());
+  layout.appendChild(itemsCard());        // Inventory — full width, top
+  layout.appendChild(pane(positionCard()));
   const sp = spawnCard();
-  if (sp) side.appendChild(sp);
-  side.appendChild(experienceCard());
-  side.appendChild(vitalsCard());
-  side.appendChild(abilitiesCard());
-
-  layout.appendChild(main);
-  layout.appendChild(side);
+  if (sp) layout.appendChild(pane(sp));    // Spawnpoint
+  layout.appendChild(effectsCard());      // Potion Effects
+  layout.appendChild(pane(experienceCard()));
+  layout.appendChild(pane(vitalsCard()));
+  layout.appendChild(pane(abilitiesCard()));
   return layout;
 }
 
