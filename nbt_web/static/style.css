@@ -468,6 +468,7 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   image-rendering: pixelated;
   pointer-events: none;
 }
+.icon-box img.fluid-still { object-fit: cover; object-position: top center; }
 .icon-box.has-icon .iname { display: none; }
 .icon-box .iname { color: var(--dim); overflow-wrap: anywhere; line-height: 1.2; }
 .icon-box .icount {
