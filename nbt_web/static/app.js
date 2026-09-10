@@ -1461,14 +1461,24 @@ function vitalsCard() {
   return c;
 }
 
+// X/Y/Z (or any coord triple) stacked in one column under a single label
+function coordColumn(body, label, nodes) {
+  const f = document.createElement("div");
+  f.className = "field";
+  const l = document.createElement("span");
+  l.className = "field-label";
+  l.textContent = label;
+  f.appendChild(l);
+  for (const n of nodes) if (n && !CONTAINERS.has(n.t)) f.appendChild(boundInput(n));
+  body.appendChild(f);
+}
+
 function positionCard() {
   const r = file.root;
   const c = card("position");
   const p = tpath(r, "Pos");
-  if (p && p.t === "list" && p.v.length === 3) {
-    const ctls = frow(c.body, "position");
-    for (const n of p.v) addNum(ctls, n, "coord");
-  }
+  if (p && p.t === "list" && p.v.length === 3)
+    coordColumn(c.body, "position", p.v);
   const rot = tpath(r, "Rotation");
   if (rot && rot.t === "list" && rot.v.length === 2) {
     const ctls = frow(c.body, "angle");
@@ -1483,10 +1493,7 @@ function spawnCard() {
   const sx = tpath(r, "SpawnX"), sy = tpath(r, "SpawnY"), sz = tpath(r, "SpawnZ");
   if (!sx && !sy && !sz) return null;
   const c = card("spawnpoint");
-  const ctls = frow(c.body, "spawn");
-  addNum(ctls, sx, "coord");
-  addNum(ctls, sy, "coord");
-  addNum(ctls, sz, "coord");
+  coordColumn(c.body, "position", [sx, sy, sz]);
   numRow(c.body, "dimension", tpath(r, "SpawnDimension"), "wide");
   return c;
 }
@@ -1778,6 +1785,13 @@ function openEffectModal() {
 function effectsCard() {
   const { list, modern } = effectsList();
   const c = card("potion effects", true);
+  c.classList.add("fx-card");
+  const addBtn = document.createElement("button");
+  addBtn.className = "fx-add";
+  addBtn.textContent = "+";
+  addBtn.title = "add effect";
+  addBtn.addEventListener("click", openEffectModal);
+  c.appendChild(addBtn);
   const wrap = document.createElement("div");
   wrap.className = "effect-cards";
   c.body.appendChild(wrap);
@@ -1812,31 +1826,29 @@ function effectsCard() {
     }
     ec.appendChild(head);
 
-    const rowEl = document.createElement("div");
-    rowEl.className = "fx-row";
     // amplifier (a.k.a. potency) and duration are omitted from the NBT when
     // they're 0 — materialise a default so the box always shows and is editable.
     const ampNode = eff.v[K.amp] || (eff.v[K.amp] = { t: "byte", v: 0 });
     const durNode = eff.v[K.dur] || (eff.v[K.dur] = { t: "int", v: 0 });
-    const ampL = document.createElement("span");
-    ampL.className = "pv-label";
-    ampL.textContent = "amplifier";
-    rowEl.appendChild(ampL);
-    rowEl.appendChild(boundInput(ampNode, "count"));
-    const durL = document.createElement("span");
-    durL.className = "pv-label";
-    durL.textContent = "duration";
-    rowEl.appendChild(durL);
-    rowEl.appendChild(boundInput(durNode, "num"));
+    // labels stacked above their boxes; both flex-fill the row width
+    const rowEl = document.createElement("div");
+    rowEl.className = "field-row";
+    const stacked = (labelText, node) => {
+      const f = document.createElement("div");
+      f.className = "field";
+      const l = document.createElement("span");
+      l.className = "field-label";
+      l.textContent = labelText;
+      f.appendChild(l);
+      f.appendChild(boundInput(node));
+      return f;
+    };
+    rowEl.appendChild(stacked("amplifier", ampNode));
+    rowEl.appendChild(stacked("duration", durNode));
     ec.appendChild(rowEl);
     wrap.appendChild(ec);
   });
 
-  const addCard = document.createElement("button");
-  addCard.className = "effect-card add";
-  addCard.textContent = "+ add effect";
-  addCard.addEventListener("click", openEffectModal);
-  wrap.appendChild(addCard);
   return c;
 }
 

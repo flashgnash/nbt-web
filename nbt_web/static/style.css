@@ -372,23 +372,38 @@ input[type="text"]:focus { border-color: var(--accent-dark); }
   flex-direction: column;
   gap: 8px;
 }
-.effect-card.add {
-  border: 1px dashed var(--border);
-  background: none;
-  color: var(--dim);
+/* small accent add-effect button in the pane header's top-right corner */
+.fx-card { position: relative; }
+.fx-add {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--bg);
   font: inherit;
+  font-size: 16px;
+  line-height: 1;
   cursor: pointer;
+  display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 74px;
-  transition: border-color 80ms, color 80ms;
+  transition: background 80ms;
 }
-.effect-card.add:hover { border-color: var(--accent-dark); color: var(--text); }
+.fx-add:hover { background: var(--accent-dark); }
 .fx-close { position: absolute; top: 6px; right: 6px; }
 .fx-head { display: flex; gap: 8px; align-items: center; padding-right: 24px; }
-.fx-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .pv-side .flabel { width: 72px; }
 .pv-side .fctls { flex-wrap: wrap; }
+/* form-panel fields fill their row; selects match sibling text inputs */
+.pv-side .fctls .pv-input,
+.pv-side .fctls .pv-select { flex: 1 1 0; max-width: none; min-width: 0; }
+/* boolean toggles hug the right edge instead of stretching */
+.pv-side .sw { margin-left: auto; }
 .mini-icon { width: 22px; height: 22px; flex: 0 0 auto; display: inline-block; }
 .mini-icon img { width: 22px; height: 22px; image-rendering: pixelated; display: block; }
 
