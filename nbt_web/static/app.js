@@ -956,6 +956,54 @@ function clipToEntry(pane, slot) {
   return { t: "compound", v: { slot: { t: "int", v: slot }, item } };
 }
 
+// Cut the item at (pane, slot) onto the clipboard and remove it. Mirrors the
+// modal "cut" button; returns the item node, or null if the slot is empty.
+function cutSlot(pane, slot) {
+  const acc = ACC[pane.style];
+  const idx = pane.node.v.findIndex((e, i) => acc.slotOf(e, i) === slot);
+  if (idx < 0) return null;
+  const entry = pane.node.v[idx];
+  const item = acc.itemOf(entry);
+  clipWrite(pane.style === "wrapped" ? item : entry);
+  pane.node.v.splice(idx, 1);
+  return item;
+}
+
+// Paste the clipboard into (pane, slot), replacing any occupant. Mirrors the
+// modal "paste" button; returns true if something was pasted.
+function pasteClipInto(pane, slot) {
+  const ne = clipToEntry(pane, slot);
+  if (!ne) return false;
+  const acc = ACC[pane.style];
+  const idx = pane.node.v.findIndex((e, i) => acc.slotOf(e, i) === slot);
+  if (idx >= 0) pane.node.v.splice(idx, 1, ne);
+  else pane.node.v.push(ne);
+  return true;
+}
+
+// Move the item from a source slot to a destination slot by reusing the exact
+// cut+paste (clipboard) logic: cut source -> paste into dest. If the dest is
+// occupied its former item is sent back to the source slot (swap). Returns
+// true on a change.
+function moveSlot(srcPane, srcSlot, dstPane, dstSlot) {
+  if (srcPane === dstPane && srcSlot === dstSlot) return false;
+  const dacc = ACC[dstPane.style];
+  const dIdx = dstPane.node.v.findIndex((e, i) => dacc.slotOf(e, i) === dstSlot);
+  let dstStash = null;
+  if (dIdx >= 0) {
+    const dEntry = dstPane.node.v[dIdx];
+    dstStash = JSON.parse(JSON.stringify(
+      dstPane.style === "wrapped" ? dacc.itemOf(dEntry) : dEntry));
+  }
+  if (!cutSlot(srcPane, srcSlot)) return false;
+  pasteClipInto(dstPane, dstSlot);
+  if (dstStash) {
+    clipWrite(dstStash);
+    pasteClipInto(srcPane, srcSlot);
+  }
+  return true;
+}
+
 // ---- item modal
 
 function openItemModal(pane, slot, rerender) {
@@ -1057,8 +1105,7 @@ function openItemModal(pane, slot, rerender) {
     cut.className = "btn";
     cut.textContent = "cut";
     cut.addEventListener("click", () => {
-      clipWrite(pane.style === "wrapped" ? item : entry);
-      pane.node.v.splice(idx, 1);
+      cutSlot(pane, slot);
       setDirty(true);
       setStatus("cut " + shortId(String(item.v.id.v)), "ok");
       shell.close();
@@ -1071,10 +1118,7 @@ function openItemModal(pane, slot, rerender) {
     paste.className = "btn";
     paste.textContent = "paste";
     paste.addEventListener("click", () => {
-      const ne = clipToEntry(pane, slot);
-      if (!ne) return;
-      if (idx >= 0) pane.node.v.splice(idx, 1, ne);
-      else pane.node.v.push(ne);
+      if (!pasteClipInto(pane, slot)) return;
       setDirty(true);
       shell.close();
       rerender();
@@ -1145,6 +1189,10 @@ function openItemModal(pane, slot, rerender) {
 
 // ---- slot grid
 
+// live drag source: { pane, slot }. Object refs stay valid because no rerender
+// happens between dragstart and drop.
+let dragSrc = null;
+
 const ARMOR_SLOTS = [
   [103, "head"], [102, "chest"], [101, "legs"], [100, "feet"], [-106, "offhand"],
 ];
@@ -1207,6 +1255,41 @@ function slotCell(pane, slot, entry, caption, state, rerender) {
   }
 
   box.addEventListener("click", () => openItemModal(pane, slot, rerender));
+
+  // drag-and-drop: dragging a filled slot onto another slot cuts+pastes (moves)
+  // the item, swapping when the target is occupied. Reuses moveSlot (the shared
+  // clipboard cut/paste logic). Click-to-open is preserved (drag suppresses it).
+  if (item) {
+    cell.draggable = true;
+    cell.addEventListener("dragstart", (e) => {
+      dragSrc = { pane, slot };
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(slot));
+      cell.classList.add("dragging");
+    });
+    cell.addEventListener("dragend", () => {
+      dragSrc = null;
+      cell.classList.remove("dragging");
+    });
+  }
+  cell.addEventListener("dragover", (e) => {
+    if (!dragSrc) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    cell.classList.add("drop-hover");
+  });
+  cell.addEventListener("dragleave", () => cell.classList.remove("drop-hover"));
+  cell.addEventListener("drop", (e) => {
+    cell.classList.remove("drop-hover");
+    if (!dragSrc) return;
+    e.preventDefault();
+    const src = dragSrc;
+    dragSrc = null;
+    if (moveSlot(src.pane, src.slot, pane, slot)) {
+      setDirty(true);
+      rerender();
+    }
+  });
   return cell;
 }
 
