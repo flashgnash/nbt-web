@@ -813,6 +813,39 @@ def list_items(server: str) -> dict:
     return {"items": sorted(set(idx["item"]) | set(idx["block"]))}
 
 
+VANILLA_DIMENSIONS = [
+    "minecraft:overworld",
+    "minecraft:the_nether",
+    "minecraft:the_end",
+]
+
+
+def list_dimensions(server: str) -> dict:
+    """Dimension ids for this server: vanilla three plus any modded dims found
+    in <world>/dimensions/<namespace>/<name>/ subdirectories (1.16+ layout)."""
+    sd = _server_dir(server)
+    found = set()
+    for world_dir in _find_worlds(sd):
+        dim_root = world_dir / "dimensions"
+        if not dim_root.is_dir():
+            continue
+        try:
+            for ns_dir in sorted(dim_root.iterdir()):
+                if not ns_dir.is_dir() or ns_dir.name.startswith("."):
+                    continue
+                ns = ns_dir.name
+                try:
+                    for dim_dir in sorted(ns_dir.iterdir()):
+                        if dim_dir.is_dir() and not dim_dir.name.startswith("."):
+                            found.add(f"{ns}:{dim_dir.name}")
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    all_dims = sorted(set(VANILLA_DIMENSIONS) | found)
+    return {"dimensions": all_dims}
+
+
 # ------------------------------------------------------------ server status
 
 # We have no live ping, so "online" is inferred from logs/latest.log: a running
@@ -984,6 +1017,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/items":
                 q = parse_qs(url.query)
                 return self._json(200, list_items(q.get("server", [""])[0]))
+            if url.path == "/api/dimensions":
+                q = parse_qs(url.query)
+                return self._json(200, list_dimensions(q.get("server", [""])[0]))
             if url.path == "/api/backups":
                 q = parse_qs(url.query)
                 return self._json(200, list_backups(q.get("path", [""])[0]))
