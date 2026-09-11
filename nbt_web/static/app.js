@@ -11,6 +11,7 @@ let viewMode = "raw";     // "player" | "raw" (player only for playerdata files)
 let activeRow = null;     // sidebar DOM row of the open file
 let currentServer = null; // server object when the server overview is shown
 const expanded = new Set(["$"]);   // editor node paths expanded
+let modalRender = null;   // set while a file modal is open; redirects renderEditor()
 const sbOpen = new Set();          // sidebar group keys expanded
 
 // player-view inventory browser state (modals hold their own)
@@ -567,12 +568,12 @@ function flatEntries() {
   return out;
 }
 
-function fileRow(label, path) {
+function fileRow(label, path, useModal) {
   const row = document.createElement("div");
   row.className = "node-row";
   row.dataset.path = path;
   row.appendChild(document.createTextNode(label));
-  row.addEventListener("click", () => openFile(path, label, row));
+  row.addEventListener("click", () => useModal ? openFileModal(path, label) : openFile(path, label, row));
   if (file && file.path === path) { row.classList.add("active"); activeRow = row; }
   return row;
 }
@@ -635,7 +636,7 @@ function renderSidebar() {
       el.appendChild(d);
       return;
     }
-    for (const e of ranked) el.appendChild(fileRow(e.label, e.path));
+    for (const e of ranked) el.appendChild(fileRow(e.label, e.path, true));
     return;
   }
 
@@ -1260,7 +1261,7 @@ function modalShell(title, wide) {
     if (i >= 0) MODALS.splice(i, 1);
     ov.remove();
   }};
-  x.addEventListener("click", shell.close);
+  x.addEventListener("click", () => shell.close());
   ov.addEventListener("mousedown", (ev) => { if (ev.target === ov) shell.close(); });
   document.body.appendChild(ov);
   MODALS.push(shell);
@@ -3109,7 +3110,7 @@ function renderServerView(s) {
       const b = document.createElement("button");
       b.className = "sv-file";
       b.textContent = e.label;
-      b.addEventListener("click", () => openFile(e.path, e.title));
+      b.addEventListener("click", () => openFileModal(e.path, e.title));
       list.appendChild(b);
     }
     card.appendChild(list);
@@ -3340,9 +3341,10 @@ function renderServersLanding() {
 // --------------------------------------------------------------- editor
 
 function renderEditor() {
+  stopServersPoll();
+  if (modalRender) { modalRender(); return; }
   const el = $("editor");
   el.textContent = "";
-  stopServersPoll();
   if (!file) {
     if (currentServer) {
       el.appendChild(renderServerView(currentServer));
@@ -3434,6 +3436,105 @@ async function openFile(path, label, row) {
   } catch (e) {
     setStatus("open failed: " + e.message, "err");
   }
+}
+
+async function openFileModal(path, label) {
+  if (dirty && !confirm("Discard unsaved changes?")) return;
+  // User confirmed discard: reload from disk so saved.file carries the clean root,
+  // not the ghost-edited root that would be silently re-persisted on next save.
+  if (dirty && file) {
+    try {
+      file = await api("/api/file?path=" + encodeURIComponent(file.path));
+    } catch (e) {
+      setStatus("reload after discard failed: " + e.message, "err");
+      return;
+    }
+  }
+  const saved = { file, dirty: false, viewMode, expanded: [...expanded] };
+
+  setStatus("loading…");
+  let mFile;
+  try {
+    mFile = await api("/api/file?path=" + encodeURIComponent(path));
+  } catch (e) {
+    setStatus("open failed: " + e.message, "err");
+    return;
+  }
+
+  // Redirect global state to the modal file so renderNode + setDirty work normally
+  file = mFile;
+  setDirty(false);
+  viewMode = "raw";
+  expanded.clear();
+  expanded.add("$");
+  setStatus(null);
+
+  const shell = modalShell(label, true);
+
+  const filterInp = document.createElement("input");
+  filterInp.type = "text";
+  filterInp.className = "pv-input";
+  filterInp.placeholder = "filter keys…";
+  filterInp.addEventListener("input", render);
+  shell.body.appendChild(filterInp);
+
+  const treeEl = document.createElement("div");
+  shell.body.appendChild(treeEl);
+
+  const foot = document.createElement("div");
+  foot.className = "modal-foot";
+  const mStatus = document.createElement("span");
+  mStatus.className = "dim";
+  foot.appendChild(mStatus);
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  foot.appendChild(spacer);
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "btn primary";
+  saveBtn.textContent = "save";
+  saveBtn.addEventListener("click", async () => {
+    try {
+      mStatus.textContent = "saving…";
+      const r = await api("/api/file?path=" + encodeURIComponent(file.path), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ root: file.root }),
+      });
+      dirty = false;
+      $("dirty").hidden = true;
+      $("save").disabled = true;
+      mStatus.textContent = "saved (backup: " + r.backup + ")";
+    } catch (e) {
+      mStatus.textContent = "save failed: " + e.message;
+    }
+  });
+  foot.appendChild(saveBtn);
+  shell.body.appendChild(foot);
+
+  function render() {
+    treeEl.textContent = "";
+    const q = filterInp.value.trim().toLowerCase();
+    treeEl.appendChild(renderNode(file.root, file.rootName || "(root)", "$", null, q));
+  }
+
+  modalRender = render;
+  render();
+
+  shell.close = () => {
+    if (dirty && !confirm("Discard unsaved changes?")) return;
+    modalRender = null;
+    file = saved.file;
+    dirty = saved.dirty;
+    viewMode = saved.viewMode;
+    expanded.clear();
+    saved.expanded.forEach((p) => expanded.add(p));
+    $("dirty").hidden = !dirty;
+    $("save").disabled = !dirty;
+    const i = MODALS.indexOf(shell);
+    if (i >= 0) MODALS.splice(i, 1);
+    shell.ov.remove();
+    renderEditor();
+  };
 }
 
 async function saveFile() {
