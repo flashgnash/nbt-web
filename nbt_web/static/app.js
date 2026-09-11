@@ -25,6 +25,8 @@ let effectIdsLoaded = null;        // server whose effect datalist is loaded
 let effectIds = [];                // known effect ids for the current server
 let itemIdsLoaded = null;          // server whose item id list is loaded
 let itemIds = [];                  // known item/block ids for the current server
+let dimensionIdsLoaded = null;     // server whose dimension list is loaded
+let dimensionIds = [];             // known dimension ids (populated by loadDimensionIds)
 
 // Potion duration is a signed 32-bit int of ticks; the game can't hold more.
 const DURATION_MAX = 2147483647;
@@ -61,6 +63,12 @@ const VANILLA_ENCHANTS = [
   "loyalty", "impaling", "riptide", "channeling", "multishot", "quick_charge",
   "piercing", "density", "breach", "wind_burst", "mending", "vanishing_curse",
 ].map((n) => "minecraft:" + n);
+
+const VANILLA_DIMENSIONS = [
+  "minecraft:overworld",
+  "minecraft:the_nether",
+  "minecraft:the_end",
+];
 
 // Vanilla item/block ids (1.21.4, from PrismarineJS/minecraft-data). Server
 // jars carry only modded textures, so vanilla ids must be bundled to appear
@@ -2428,6 +2436,20 @@ function coordColumn(body, label, nodes) {
   body.appendChild(f);
 }
 
+function dimensionRow(body, label, node) {
+  if (!node) return null;
+  if (node.t !== "string") return numRow(body, label, node, "num");
+  const ctls = frow(body, label);
+  const combo = comboBox({
+    options: dimensionIds,
+    placeholder: "minecraft:overworld",
+    initial: node.v,
+    onChange: (v) => { node.v = v; setDirty(true); },
+  });
+  ctls.appendChild(combo.el);
+  return ctls;
+}
+
 function positionCard() {
   const r = file.root;
   const c = card("position");
@@ -2439,7 +2461,7 @@ function positionCard() {
     const ctls = frow(c.body, "angle");
     for (const n of rot.v) addNum(ctls, n, "coord");
   }
-  numRow(c.body, "dimension", tpath(r, "Dimension"), "wide");
+  dimensionRow(c.body, "dimension", tpath(r, "Dimension"));
   return c;
 }
 
@@ -2449,7 +2471,7 @@ function spawnCard() {
   if (!sx && !sy && !sz) return null;
   const c = card("spawnpoint");
   coordColumn(c.body, "position", [sx, sy, sz]);
-  numRow(c.body, "dimension", tpath(r, "SpawnDimension"), "wide");
+  dimensionRow(c.body, "dimension", tpath(r, "SpawnDimension"));
   return c;
 }
 
@@ -2527,6 +2549,16 @@ async function loadItemIds() {
   catch { /* mods dir may not exist — vanilla ids still populate the list */ }
   itemIds = [...new Set([...VANILLA_ITEMS, ...mod])].sort();
   itemIdsLoaded = server;
+}
+
+async function loadDimensionIds() {
+  const server = fileServer();
+  if (!server || dimensionIdsLoaded === server) return;
+  let mod = [];
+  try { mod = (await api("/api/dimensions?server=" + encodeURIComponent(server))).dimensions; }
+  catch { /* dimensions dir may not exist */ }
+  dimensionIds = [...new Set([...VANILLA_DIMENSIONS, ...mod])].sort();
+  dimensionIdsLoaded = server;
 }
 
 // Styled autocomplete for any game-ID field (a native <datalist> can't be
@@ -3431,6 +3463,7 @@ async function openFile(path, label, row) {
     if (row) { row.classList.add("active"); activeRow = row; }
     loadEffectIds();
     loadItemIds();
+    await loadDimensionIds();
     renderEditor();
     collapseSidebar();
   } catch (e) {
