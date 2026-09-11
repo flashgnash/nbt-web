@@ -2437,11 +2437,12 @@ function coordColumn(body, label, nodes) {
 
 function dimensionRow(body, label, node) {
   if (!node) return null;
+  if (node.t !== "string") return numRow(body, label, node, "num");
   const ctls = frow(body, label);
   const combo = comboBox({
     options: dimensionIds,
     placeholder: "minecraft:overworld",
-    initial: String(node.v),
+    initial: node.v,
     onChange: (v) => { node.v = v; setDirty(true); },
   });
   ctls.appendChild(combo.el);
@@ -3453,7 +3454,7 @@ async function openFile(path, label, row) {
     if (row) { row.classList.add("active"); activeRow = row; }
     loadEffectIds();
     loadItemIds();
-    loadDimensionIds();
+    await loadDimensionIds();
     renderEditor();
     collapseSidebar();
   } catch (e) {
