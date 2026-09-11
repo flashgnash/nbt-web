@@ -3334,10 +3334,10 @@ function renderServersLanding() {
 // --------------------------------------------------------------- editor
 
 function renderEditor() {
+  stopServersPoll();
   if (modalRender) { modalRender(); return; }
   const el = $("editor");
   el.textContent = "";
-  stopServersPoll();
   if (!file) {
     if (currentServer) {
       el.appendChild(renderServerView(currentServer));
@@ -3433,6 +3433,16 @@ async function openFile(path, label, row) {
 
 async function openFileModal(path, label) {
   if (dirty && !confirm("Discard unsaved changes?")) return;
+  // User confirmed discard: reload from disk so saved.file carries the clean root,
+  // not the ghost-edited root that would be silently re-persisted on next save.
+  if (dirty && file) {
+    try {
+      file = await api("/api/file?path=" + encodeURIComponent(file.path));
+    } catch (e) {
+      setStatus("reload after discard failed: " + e.message, "err");
+      return;
+    }
+  }
   const saved = { file, dirty: false, viewMode, expanded: [...expanded] };
 
   setStatus("loading…");
@@ -3446,7 +3456,7 @@ async function openFileModal(path, label) {
 
   // Redirect global state to the modal file so renderNode + setDirty work normally
   file = mFile;
-  dirty = false;
+  setDirty(false);
   viewMode = "raw";
   expanded.clear();
   expanded.add("$");
