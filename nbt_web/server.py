@@ -145,9 +145,14 @@ def discover_tree() -> dict:
         for f in dats:
             if f.parent.name == "playerdata" and f.suffix == ".dat":
                 uuid = f.stem
+                try:
+                    mtime = int(f.stat().st_mtime)
+                except OSError:
+                    mtime = None
                 players[uuid] = {
                     "uuid": uuid,
                     "label": names.get(uuid.lower(), uuid),
+                    "mtime": mtime,
                     "files": [{"label": "playerdata", "path": _rel(f)}],
                 }
         for uuid, ent in players.items():
